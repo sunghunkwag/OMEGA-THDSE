@@ -1,0 +1,6 @@
+{"event": "round_complete", "round": 0, "stagnation": true, "gap_spec": {"round": 0, "seed": 11, "tasks": ["theory_discovery"], "recent_rewards": [0.03394065029701208], "constraints": {"quarantine_only": true, "no_self_adoption": true, "max_candidates": 1}}, "critic_results": [{"proposal_id": "538a51d89f58", "level": "L0", "verdict": "reject", "adopted": false}, {"proposal_id": "1e049d120475", "level": "L2", "verdict": "reject", "adopted": false}]}
+{"event": "critic_decision", "round": 0, "proposal_id": "538a51d89f58", "level": "L0", "verdict": "reject", "adopted": false, "result": "REJECTED"}
+{"event": "critic_decision", "round": 0, "proposal_id": "1e049d120475", "level": "L2", "verdict": "reject", "adopted": false, "result": "REJECTED"}
+{"event": "round_complete", "round": 1, "stagnation": false, "gap_spec": null, "critic_results": [{"proposal_id": "999e4c82ad25", "level": "L1", "verdict": "reject", "adopted": false}, {"proposal_id": "5d23c3a48768", "level": "L2", "verdict": "reject", "adopted": false}]}
+{"event": "critic_decision", "round": 1, "proposal_id": "999e4c82ad25", "level": "L1", "verdict": "reject", "adopted": false, "result": "REJECTED"}
+{"event": "critic_decision", "round": 1, "proposal_id": "5d23c3a48768", "level": "L2", "verdict": "reject", "adopted": false, "result": "REJECTED"}

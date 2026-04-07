@@ -1,0 +1,23 @@
+# Build artifacts
+target/
+*.whl
+*.so
+*.pyd
+*.dll
+build_err.txt
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Internal workspace / debug scripts
+_co_agent_workspace/
+inject.ps1
+win32_inject.ps1
+
+# IDE / OS
+.vscode/
+.idea/
+*.swp
+Thumbs.db
