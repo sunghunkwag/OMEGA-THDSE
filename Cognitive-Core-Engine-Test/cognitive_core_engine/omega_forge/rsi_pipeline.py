@@ -283,7 +283,10 @@ class RSISkillRegistrar:
         }
         # Override auto-generated id with our skill_id
         skill.id = skill_id
-        self._skills.register(skill)
+        # Quarantine + clean-halts already passed above; treat that as
+        # the governance approval signal for the skill registration
+        # gate added in PLAN.md Phase 4 (Rule 7).
+        self._skills.register(skill, governance_approved=True)
         self._registered_gids.add(gid)
 
         # Step 4: Record provenance in SharedMemory

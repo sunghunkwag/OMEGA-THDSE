@@ -29,13 +29,18 @@ class SharedMemory:
     Shared KB using HDC for associative retrieval.
     """
 
-    def __init__(self, max_items: int = 20000) -> None:
+    def __init__(self, max_items: int = 20000, rng: Any = None) -> None:
         self.max_items = max_items
         self._items: List[MemoryItem] = []
         # HDC Memory Index
         self._item_vectors: Dict[str, FhrrVector] = {}
         # Cache common vectors to speed up encoding
         self._token_cache: Dict[str, FhrrVector] = {}
+        # Optional DeterministicRNG fork (Phase 4 / PLAN.md Rule 10).
+        # FhrrVector.from_seed is already deterministic, so this is a
+        # wiring point for any future random sampling inside memory
+        # encoding paths.
+        self._rng = rng
 
     def _get_token_hv(self, token: str) -> FhrrVector:
         if token not in self._token_cache:
@@ -50,7 +55,10 @@ class SharedMemory:
         """
         tokens = tokenize(text)
         if not tokens:
-            return HyperVector.zero()
+            # Bug fix (Phase 4): the legacy code referenced HyperVector,
+            # which has not existed since the FHRR migration. Use
+            # FhrrVector.zero() instead.
+            return FhrrVector.zero()
 
         # Position-bound encoding: hv = Σ(permute(token_hv, position))
         position_vecs = [self._get_token_hv(t).permute(i + 1) for i, t in enumerate(tokens)]
@@ -121,6 +129,47 @@ class SharedMemory:
             self._item_vectors.pop(removed.id, None)
 
         return item.id
+
+    def accept_thdse_provenance(self, provenance_event: Dict[str, Any]) -> str:
+        """Store a THDSE provenance event as a memory item (Phase 4 Gap 5 wiring).
+
+        ``provenance_event`` should carry at minimum ``source_arena``,
+        ``operation``, ``result_similarity``, and ``timestamp``. The
+        event is persisted as a ``thdse_provenance``-kind memory item
+        whose content includes a ``metadata.provenance`` sub-dict
+        (PLAN.md Rule 9).
+        """
+        if not isinstance(provenance_event, dict):
+            raise TypeError(
+                f"provenance_event must be a dict, got "
+                f"{type(provenance_event).__name__}"
+            )
+        source_arena = provenance_event.get("source_arena", "unknown")
+        operation = provenance_event.get("operation", "unknown")
+        result_similarity = provenance_event.get("result_similarity")
+        timestamp = provenance_event.get("timestamp", now_ms())
+        title = f"thdse_provenance:{operation}:{source_arena}"
+        content: Dict[str, Any] = {
+            "source_arena": source_arena,
+            "operation": operation,
+            "result_similarity": result_similarity,
+            "timestamp": timestamp,
+            "raw_event": dict(provenance_event),
+            "metadata": {
+                "provenance": {
+                    "operation": "accept_thdse_provenance",
+                    "source_arena": source_arena,
+                    "target_arena": "cce_memory",
+                    "timestamp": timestamp,
+                }
+            },
+        }
+        return self.add(
+            kind="thdse_provenance",
+            title=title,
+            content=content,
+            tags=["thdse", "provenance", source_arena],
+        )
 
     def search(self, query: str, k: int = 10,
                kinds: Optional[List[str]] = None,

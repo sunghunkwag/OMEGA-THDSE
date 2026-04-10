@@ -327,3 +327,76 @@ class CausalChainTracker:
             data={"task_name": task_name, "reward": reward, "agent_name": agent_name},
         )
         return self._append_event(event)
+
+    # ------------------------------------------------------------------
+    # PLAN.md Phase 4 — Gap 4: THDSE provenance ingestion
+    # ------------------------------------------------------------------
+
+    def record_thdse_provenance(
+        self,
+        source_arena: str,
+        operation: str,
+        result: str,
+        round_idx: int,
+        cause_event_id: Optional[str] = None,
+    ) -> str:
+        """Record a THDSE provenance event (PLAN.md Phase 4 Gap 4 wiring).
+
+        Used by :mod:`bridges.causal_provenance_bridge` callers to push
+        THDSE-side synthesis events into the CCE causal chain so the
+        unified engine has a single chronological audit trail.
+        """
+        event = CausalEvent(
+            event_id=self._make_event_id("tp"),
+            event_type="thdse_provenance",
+            timestamp_round=round_idx,
+            cause_event_id=cause_event_id,
+            data={
+                "source_arena": source_arena,
+                "operation": operation,
+                "result": result,
+                "metadata": {
+                    "provenance": {
+                        "operation": "record_thdse_provenance",
+                        "source_arena": source_arena,
+                        "target_arena": "cce",
+                    }
+                },
+            },
+        )
+        return self._append_event(event)
+
+    def record_unsat_event(
+        self,
+        formula_id: str,
+        reason: str,
+        round_idx: int,
+        cause_event_id: Optional[str] = None,
+    ) -> str:
+        """Record a THDSE Z3 UNSAT verdict (PLAN.md Rule 8).
+
+        UNSAT events MUST never be silently swallowed — every UNSAT
+        result reaching this method is logged with ``logged=True`` in
+        its ``data`` field so post-hoc audits can verify the
+        no-silent-failure invariant by counting events whose data
+        carries that flag.
+        """
+        event = CausalEvent(
+            event_id=self._make_event_id("us"),
+            event_type="synthesis_unsat",
+            timestamp_round=round_idx,
+            cause_event_id=cause_event_id,
+            data={
+                "formula_id": formula_id,
+                "reason": reason,
+                "logged": True,
+                "metadata": {
+                    "provenance": {
+                        "operation": "record_unsat_event",
+                        "source_arena": "thdse",
+                        "target_arena": "cce",
+                    }
+                },
+            },
+        )
+        return self._append_event(event)
