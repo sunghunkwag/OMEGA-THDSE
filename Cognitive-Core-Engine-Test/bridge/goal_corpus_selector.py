@@ -1,3 +1,21 @@
+"""DEPRECATED: replaced by ``bridges/goal_synthesis_bridge.py`` (PLAN.md Phase 4).
+
+This module owns its own ``hdc_core.FhrrArena`` instance, which violates
+PLAN.md Rule 3 (single arena owner) and is the orphaned third arena
+identified in PLAN.md Section A. It is preserved unchanged for any
+downstream code that still imports it; new callers should migrate to
+:class:`bridges.goal_synthesis_bridge.GoalSynthesisBridge`.
+"""
+
+import warnings
+
+warnings.warn(
+    "goal_corpus_selector.py is deprecated. "
+    "Use bridges/goal_synthesis_bridge.py instead.",
+    DeprecationWarning,
+    stacklevel=2,
+)
+
 import hdc_core
 import numpy as np
 from typing import List, Dict

@@ -120,11 +120,21 @@ class Agent:
         intrinsic_motivation: Optional[IntrinsicMotivationModule] = None,
         self_model: Optional[SelfModel] = None,
         concept_graph: Optional[ConceptGraph] = None,
+        rng: Any = None,
     ) -> None:
         self.cfg = cfg
         self.tools = tools
         self.mem = shared_mem
         self.skills = skills
+
+        # PLAN.md Rule 10 (Determinism): every random draw inside this
+        # agent must come from a seeded source. The orchestrator wires
+        # in a DeterministicRNG fork; without one we fall back to a
+        # locally-seeded ``random.Random`` so legacy callers keep working.
+        if rng is None:
+            self._rng = random.Random(42)
+        else:
+            self._rng = rng
 
         self.wm = WorldModel()
         self.planner = Planner(self.wm, depth=cfg.planner_depth,
@@ -148,6 +158,44 @@ class Agent:
         self._rsi_skill_accepted: bool = False
         # BN-10 Fix 4: Store raw skill output for env.step() skill_bonus
         self._last_rsi_skill_output: Optional[float] = None
+
+    # ------------------------------------------------------------------
+    # PLAN.md Rule 10: deterministic random helpers
+    # ------------------------------------------------------------------
+
+    def _rand_unit(self) -> float:
+        """Return a float in [0, 1) using the agent's seeded RNG.
+
+        Works with both ``random.Random`` (when no rng was injected)
+        and ``numpy.random.Generator`` (when the orchestrator injected
+        a DeterministicRNG fork).
+        """
+        if hasattr(self._rng, "random"):
+            value = self._rng.random()
+            # numpy generators may return an array; coerce to float.
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                return float(value[0])  # type: ignore[index]
+        # Last-resort: assume the rng has ``uniform``.
+        return float(self._rng.uniform(0.0, 1.0))
+
+    def _rand_choice(self, seq: List[Any]) -> Any:
+        """Pick a uniform random element from ``seq`` via the agent RNG."""
+        if not seq:
+            raise IndexError("Cannot _rand_choice from an empty sequence")
+        if hasattr(self._rng, "choice"):
+            picked = self._rng.choice(seq)  # type: ignore[arg-type]
+            # numpy generators on a list of strings return a numpy str;
+            # cast back to plain Python so downstream comparisons keep
+            # behaving like the legacy ``random.choice`` did.
+            return picked.item() if hasattr(picked, "item") else picked
+        # ``random.Random`` exposes ``choice`` already; the branch above
+        # covers it. The fallback below handles minimal duck-typed RNGs.
+        idx = int(self._rand_unit() * len(seq))
+        if idx >= len(seq):
+            idx = len(seq) - 1
+        return seq[idx]
 
     # ------------------------------------------------------------------
     # BN-06: transition log management
@@ -288,7 +336,7 @@ class Agent:
             candidates = []
 
         if not candidates:
-            return random.choice(self.action_space())
+            return self._rand_choice(self.action_space())
 
         draft_action = candidates[0].actions[0]
         task = obs.get("task", "")
@@ -316,7 +364,7 @@ class Agent:
         if success_count + failure_count > 0:
             success_rate = success_count / (success_count + failure_count)
             if success_rate < 0.3 and failure_count >= 3:
-                if random.random() < 0.6 and len(candidates) > 1:
+                if self._rand_unit() < 0.6 and len(candidates) > 1:
                     return candidates[1].actions[0]
 
         # Curiosity-boosted exploration
@@ -359,7 +407,7 @@ class Agent:
                                     acceptance_prob = min(0.9, 0.6 + 0.3 * mean_perf / max_perf)
                                 else:
                                     acceptance_prob = 0.6
-                                if random.random() < acceptance_prob:
+                                if self._rand_unit() < acceptance_prob:
                                     self._last_consulted_rsi_skill_id = sk.id
                                     self._rsi_skill_accepted = True
                                     # BN-10 Fix 4: Store raw skill output
@@ -370,9 +418,9 @@ class Agent:
             except Exception:
                 pass
 
-        if random.random() > self.cfg.risk:
+        if self._rand_unit() > self.cfg.risk:
             return draft_action
-        return random.choice(self.action_space())
+        return self._rand_choice(self.action_space())
 
     # ------------------------------------------------------------------
     # Skill synthesis
@@ -380,7 +428,7 @@ class Agent:
 
     def maybe_synthesize_skill(self, obs: Dict[str, Any]) -> Optional[str]:
         task = obs.get("task", "")
-        if task == "verification_pipeline" and random.random() < 0.30:
+        if task == "verification_pipeline" and self._rand_unit() < 0.30:
             sk = Skill(
                 name=f"{self.cfg.name}_verify_pipeline",
                 purpose="Evaluate candidate and write verified note if passing.",
@@ -401,7 +449,7 @@ class Agent:
                 tags=["verification", "meta"],
             )
             return self.skills.add(sk)
-        if task == "toolchain_speedup" and random.random() < 0.30:
+        if task == "toolchain_speedup" and self._rand_unit() < 0.30:
             sk = Skill(
                 name=f"{self.cfg.name}_toolchain_upgrade",
                 purpose="Propose toolchain improvement artifact for each hint.",
@@ -568,11 +616,11 @@ class Agent:
             tags=["episode", self.cfg.role, obs.get("task", "task")],
         )
 
-        if random.random() < 0.35:
+        if self._rand_unit() < 0.35:
             tag = "verification" if action == "write_verified_note" else "toolchain"
             candidates = self.skills.list(tag=tag)
             if candidates:
-                sk = random.choice(candidates)
+                sk = self._rand_choice(candidates)
                 out = sk.run(self.tools, context)
                 self.mem.add("note", f"{self.cfg.name}:skill_run:{sk.name}",
                              {"skill_id": sk.id, "out": out},

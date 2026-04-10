@@ -14,6 +14,14 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from agi_modules.competence_map import CompetenceMap
 
+# Phase 4: optional GoalSynthesisBridge wiring (Gap 8). Wrapped in
+# try/except so legacy environments without ``bridges/`` on PYTHONPATH
+# keep importing this module without crashing.
+try:
+    from bridges.goal_synthesis_bridge import GoalSynthesisBridge  # noqa: F401
+except Exception:  # pragma: no cover — defensive optional import
+    GoalSynthesisBridge = None  # type: ignore[assignment]
+
 # --- Named constants (Rule 6) ---
 
 # Strategy weights for goal generation
@@ -77,7 +85,8 @@ class GoalGenerator:
 
     def __init__(self, competence_map: CompetenceMap,
                  shared_mem: Any,
-                 rng: random.Random) -> None:
+                 rng: random.Random,
+                 goal_bridge: Any = None) -> None:
         self.competence_map = competence_map
         self.shared_mem = shared_mem
         self.rng = rng
@@ -91,6 +100,10 @@ class GoalGenerator:
         self._skill_goal_links: Dict[str, str] = {}  # (trigger_skill_id, goal_name) pairs
         self._skill_derived_goals: List[TaskSpec] = []
         self._all_generated_goal_names: set = set()
+        # PLAN.md Phase 4 (Gap 8): optional GoalSynthesisBridge for advisory
+        # ranking. Soft integration: if absent, frontier/gap strategies
+        # behave exactly like before.
+        self._goal_bridge = goal_bridge
 
     def _domain_fingerprint(self, domain: str) -> frozenset:
         """Compute structural fingerprint for a domain name.
@@ -262,10 +275,12 @@ class GoalGenerator:
         name = f"frontier_{domain}_d{new_diff}"
         if name in HARDCODED_TASK_NAMES:
             name = f"frontier_expand_{domain}_d{new_diff}"
+        baseline = max(0.05, rate * 0.8)
+        baseline = self._maybe_bridge_adjust(baseline, name, new_diff)
         return TaskSpec(
             name=name,
             difficulty=new_diff,
-            baseline=max(0.05, rate * 0.8),
+            baseline=baseline,
             domain=domain,
         )
 
@@ -283,10 +298,86 @@ class GoalGenerator:
         name = f"gap_{domain}_d{diff}"
         if name in HARDCODED_TASK_NAMES:
             name = f"gap_remediate_{domain}_d{diff}"
+        baseline = max(0.05, rate * 0.9)
+        baseline = self._maybe_bridge_adjust(baseline, name, diff)
         return TaskSpec(
             name=name,
             difficulty=diff,
-            baseline=max(0.05, rate * 0.9),
+            baseline=baseline,
+            domain=domain,
+        )
+
+    def _maybe_bridge_adjust(
+        self, baseline: float, goal_name: str, difficulty: int
+    ) -> float:
+        """Soft advisory adjustment using the optional GoalSynthesisBridge.
+
+        Returns ``baseline`` unchanged when no bridge is wired in. When
+        a bridge IS present, ``rank_goals`` is called with a synthetic
+        single-element list and the resulting ``rank_score`` (priority *
+        projected_similarity) is blended into the baseline at 10%
+        weight. This is intentionally a SOFT integration — the bridge
+        only nudges, never gates.
+        """
+        if self._goal_bridge is None:
+            return baseline
+        try:
+            advisory_priority = max(0.05, baseline)
+            synthetic_goal = {
+                "priority": advisory_priority,
+                "projected_similarity": 1.0,
+                "metadata": {
+                    "goal_description": goal_name,
+                    "difficulty": difficulty,
+                    "provenance": {"operation": "advisory_rank"},
+                },
+            }
+            ranked = self._goal_bridge.rank_goals([synthetic_goal])
+            if ranked:
+                advisory_score = float(ranked[0].get("rank_score", baseline))
+                blended = 0.9 * baseline + 0.1 * advisory_score
+                return max(0.05, blended)
+        except Exception:
+            return baseline
+        return baseline
+
+    def generate_from_thdse_synthesis(
+        self, synthesis_result: Dict[str, Any]
+    ) -> TaskSpec:
+        """Materialize a goal from a THDSE synthesis result (Phase 4 Gap 8).
+
+        ``synthesis_result`` must include ``axiom_name``, ``confidence``,
+        and ``domain``. Optional ``difficulty`` defaults to 5. The
+        returned :class:`TaskSpec` carries a stable name derived from
+        the axiom and a baseline calibrated by confidence so the
+        downstream curriculum scheduler can place it correctly.
+        """
+        if not isinstance(synthesis_result, dict):
+            raise TypeError(
+                f"synthesis_result must be a dict, got "
+                f"{type(synthesis_result).__name__}"
+            )
+        for required in ("axiom_name", "confidence", "domain"):
+            if required not in synthesis_result:
+                raise KeyError(
+                    f"synthesis_result missing required key {required!r}"
+                )
+        axiom_name = str(synthesis_result["axiom_name"])
+        confidence = float(synthesis_result["confidence"])
+        domain = str(synthesis_result["domain"])
+        difficulty = int(synthesis_result.get("difficulty", 5))
+        # Confidence is in [0, 1]; convert to a baseline pegged into
+        # [0.05, 0.7] so trivially confident axioms still leave learning room.
+        baseline = max(0.05, min(0.7, confidence * 0.8))
+        # Build a unique goal name; clash-protect against hardcoded names.
+        name = f"thdse_axiom_{axiom_name}_{domain}_d{difficulty}"
+        if name in HARDCODED_TASK_NAMES or name in self._all_generated_goal_names:
+            name = f"{name}_{self.rng.randint(100, 999)}"
+        self._all_generated_goal_names.add(name)
+        return TaskSpec(
+            name=name,
+            difficulty=difficulty,
+            baseline=baseline,
             domain=domain,
         )
 

@@ -15,6 +15,18 @@ from cognitive_core_engine.core.skills import SkillLibrary
 from cognitive_core_engine.core.project_graph import ProjectGraph
 from cognitive_core_engine.core.environment import TaskSpec, ResearchEnvironment, RuleProposal
 from cognitive_core_engine.core.agent import Agent, AgentConfig
+from cognitive_core_engine.core import fhrr as _fhrr_module
+
+# PLAN.md Phase 4: wire the unified ArenaManager + DeterministicRNG
+# into the C-layer. The Orchestrator owns one of each per process.
+from shared.arena_manager import ArenaManager
+from shared.deterministic_rng import DeterministicRNG
+from shared.constants import (
+    CCE_ARENA_DIM,
+    CCE_ARENA_CAP,
+    THDSE_ARENA_DIM,
+    THDSE_ARENA_CAP,
+)
 
 from agi_modules.competence_map import CompetenceMap
 from agi_modules.goal_generator import GoalGenerator, GoalGenerationError
@@ -84,7 +96,15 @@ class Orchestrator:
         self.tools = tools
         self._env_type = env_type
 
-        self.mem = SharedMemory()
+        # PLAN.md Phase 4 wiring: own the unified arena + deterministic
+        # RNG before any subsystem touches FhrrVector. Setting the arena
+        # manager on the fhrr module replaces the legacy module-level
+        # ARENA global with manager-owned arenas (Rule 3).
+        self._drng = DeterministicRNG(master_seed=42)
+        self._arena_mgr = ArenaManager(master_seed=42)
+        _fhrr_module.set_arena_manager(self._arena_mgr)
+
+        self.mem = SharedMemory(rng=self._drng.fork("cce_memory"))
         self.skills = SkillLibrary()
         self.projects = ProjectGraph()
 
@@ -154,6 +174,21 @@ class Orchestrator:
 
         self._init_agents()
 
+    @property
+    def arena_manager(self) -> ArenaManager:
+        """Return the orchestrator-owned :class:`ArenaManager` instance.
+
+        PLAN.md Phase 4 hook: bridges and external probes that need
+        access to the unified arenas should pull them off the
+        orchestrator instead of constructing their own.
+        """
+        return self._arena_mgr
+
+    @property
+    def deterministic_rng(self) -> DeterministicRNG:
+        """Return the orchestrator-owned :class:`DeterministicRNG` instance."""
+        return self._drng
+
     def _init_agents(self) -> None:
         roles = list(self._org_policy["role_mix"])
 
@@ -182,6 +217,7 @@ class Orchestrator:
                 intrinsic_motivation=self.intrinsic_motivation,
                 self_model=self.self_model,
                 concept_graph=self.concept_graph,
+                rng=self._drng.fork(f"agent_{i}"),
             ))
 
     def _record_round_rewards(self, results: List[Dict[str, Any]]) -> None:

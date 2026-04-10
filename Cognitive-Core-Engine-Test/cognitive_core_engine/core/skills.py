@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Optional
 
 from cognitive_core_engine.core.utils import stable_hash
+from shared.exceptions import GovernanceError
 
 if TYPE_CHECKING:
     from cognitive_core_engine.core.tools import ToolRegistry
@@ -148,8 +149,24 @@ class SkillLibrary:
                 self._skills.pop(sid, None)
         return sk.id
 
-    def register(self, sk: Skill) -> str:
-        """Register a skill (alias for add, used by RSI pipeline)."""
+    def register(self, sk: Skill, *, governance_approved: bool = False) -> str:
+        """Register a skill, gated by governance approval (PLAN.md Rule 7).
+
+        ``governance_approved`` MUST be exactly ``True`` (a strict identity
+        check, not a truthiness check) — passing ``1``, ``"yes"``, or any
+        other truthy non-True value raises :class:`GovernanceError`.
+
+        Internal CCE paths that need to bypass governance should call
+        :meth:`add` directly. The :class:`AxiomSkillBridge` in
+        ``bridges/axiom_skill_bridge.py`` is the canonical caller of
+        the governance-gated path for THDSE-synthesized programs.
+        """
+        if governance_approved is not True:
+            raise GovernanceError(
+                "SkillLibrary.register() requires governance_approved=True",
+                subject=getattr(sk, "name", "<unknown>"),
+                reason="unapproved",
+            )
         return self.add(sk)
 
     def vm_skills(self) -> List[Skill]:
