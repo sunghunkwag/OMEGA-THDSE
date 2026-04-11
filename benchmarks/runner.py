@@ -148,8 +148,18 @@ def _build_synthesizer(
         arena=arena, projector=projector, resonance_threshold=0.10
     )
     if use_behavioural:
+        # The behavioural encoder operates on its OWN arena so its
+        # allocation pattern (hundreds of probe calls per axiom) cannot
+        # contaminate the structural arena that the projector and
+        # sub-tree vocabulary share. Using the same arena was a
+        # correctness bug: it shifted the atom-handle indices that
+        # probe_subtrees uses and caused the decoder to miss sub-trees
+        # that activated cleanly in baseline mode.
+        behavioural_arena = _PyFhrrArenaExtended(
+            capacity=200_000, dimension=256,
+        )
         behavioural_encoder = BehavioralEncoder(
-            arena=arena, dimension=256, n_probes=20
+            arena=behavioural_arena, dimension=256, n_probes=20,
         )
         synthesizer.behavioral_encoder = behavioural_encoder
     else:
@@ -251,6 +261,45 @@ def run_problem(
     total_atoms_added = 0
     initial_vocab_size = vocab.size()
 
+    # Behavioural mode produces much larger cliques than the baseline
+    # (the behavioural similarity lifts many more pairs above tau), and
+    # chain-binding a 14-axiom clique scrambles the synthesized vector
+    # so aggressively that sub-tree probing finds almost nothing. We
+    # therefore also enqueue SMALLER sub-cliques — deterministic pairs
+    # and triples drawn from the top cliques — so beam_decode has a
+    # shot at the same tightly-bound projections the baseline explores.
+    def _build_subclique_sources(top_cliques):
+        """Generate (clique, projection) pairs from top cliques AND
+        their lexicographic pair subsets, deduplicated by identity.
+        """
+        sources: List[Tuple[List[str], Any]] = []
+        seen: set = set()
+        for clique in top_cliques:
+            key = tuple(sorted(clique))
+            if key not in seen:
+                seen.add(key)
+                try:
+                    projection = synthesizer.synthesize_from_clique(clique)
+                except Exception:  # noqa: BLE001
+                    projection = None
+                if projection is not None:
+                    sources.append((list(clique), projection))
+            # Also emit adjacent pairs from this clique so the chain-
+            # bind produces a tightly-focused projection.
+            ordered = sorted(clique)
+            for i in range(len(ordered) - 1):
+                pair = [ordered[i], ordered[i + 1]]
+                pair_key = tuple(pair)
+                if pair_key in seen:
+                    continue
+                seen.add(pair_key)
+                try:
+                    projection = synthesizer.synthesize_from_clique(pair)
+                except Exception:  # noqa: BLE001
+                    continue
+                sources.append((pair, projection))
+        return sources
+
     for cycle_idx in range(max_cycles):
         synthesizer.compute_resonance()
 
@@ -259,9 +308,19 @@ def run_problem(
             ranked = synthesizer.synthesize_for_problem(
                 problem_vector, min_clique_size=2, top_k=max_cliques_per_cycle
             )
-            clique_sources: List[Tuple[List[str], Any]] = [
-                (clique, projection) for clique, projection, _score in ranked
-            ]
+            goal_cliques = [clique for clique, _p, _s in ranked]
+            # Safety net: union with size-ordered top cliques so the
+            # goal-directed pass cannot drop the clique the baseline
+            # relies on.
+            size_ordered = synthesizer.extract_cliques(min_size=2)
+            seen_ids = {tuple(sorted(c)) for c in goal_cliques}
+            for clique in size_ordered[:max_cliques_per_cycle]:
+                key = tuple(sorted(clique))
+                if key in seen_ids:
+                    continue
+                seen_ids.add(key)
+                goal_cliques.append(clique)
+            clique_sources = _build_subclique_sources(goal_cliques)
         else:
             cliques = synthesizer.extract_cliques(min_size=2)
             cliques = cliques[:max_cliques_per_cycle]

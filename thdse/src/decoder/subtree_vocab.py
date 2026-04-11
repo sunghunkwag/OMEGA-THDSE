@@ -97,14 +97,40 @@ class _NameCanonicalizer(ast.NodeTransformer):
         return self._has_load
 
     def visit_Name(self, node: ast.Name) -> ast.Name:
-        """Replace variable name with positional placeholder."""
+        """Replace variable name with positional placeholder.
+
+        Python built-in names are preserved verbatim — they are part of
+        the language surface, not variable identifiers that should be
+        renamed. Treating them as placeholders was a canonicalization
+        bug: the existing list already preserved ``len``, ``sorted`` and
+        ``reversed`` but inexplicably dropped the other standard
+        reduction and arithmetic built-ins (``sum``, ``max``, ``min``,
+        ``abs``, ``all``, ``any``, ``round``, ``pow``, ``divmod``), so
+        canonical sub-trees such as ``return sum(x0)`` never entered
+        the vocabulary even when the source corpus defined them. The
+        expanded set below is domain-agnostic — it contains exactly the
+        Python built-in functions that have no local shadowing meaning,
+        so the vocabulary can capture structural patterns involving
+        them for ANY problem, not just any specific benchmark.
+        """
         # Preserve built-in names that are structural (range, len, print, etc.)
         builtins = {
-            "range", "len", "print", "int", "float", "str", "bool",
-            "list", "dict", "set", "tuple", "enumerate", "zip", "map",
-            "filter", "sorted", "reversed", "isinstance", "type",
+            # Type constructors / conversions
+            "int", "float", "str", "bool", "list", "dict", "set", "tuple",
+            "bytes", "bytearray", "complex", "frozenset",
+            # Iterables / higher-order
+            "range", "enumerate", "zip", "map", "filter", "sorted",
+            "reversed", "iter", "next",
+            # Reductions & numeric built-ins
+            "len", "sum", "max", "min", "abs", "all", "any",
+            "round", "pow", "divmod",
+            # I/O & reflection
+            "print", "isinstance", "type", "hash", "id", "repr",
+            "ord", "chr", "hex", "oct", "bin",
+            # Singletons & common exception types
             "True", "False", "None", "ValueError", "TypeError",
             "KeyError", "IndexError", "StopIteration", "Exception",
+            "AttributeError", "RuntimeError", "ZeroDivisionError",
         }
         if node.id in builtins:
             return node
