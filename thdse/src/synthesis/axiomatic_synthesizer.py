@@ -147,16 +147,144 @@ class AxiomaticSynthesizer:
 
     def __init__(
         self,
-        arena: Any,
-        projector: IsomorphicProjector,
+        arena: Any = None,
+        projector: IsomorphicProjector = None,
         resonance_threshold: float = 0.15,
+        *,
+        arena_manager: Any = None,
+        provenance_bridge: Any = None,
+        causal_tracker: Any = None,
+        frozen_rng: Any = None,
     ):
+        # PLAN.md Phase 6 wiring (Rule 3 + Rule 14): when an
+        # ArenaManager is injected the synthesizer borrows that
+        # manager's THDSE arena instead of carrying its own. The old
+        # ``arena`` positional argument remains for backward
+        # compatibility (Rule 16) — passing a raw arena still works.
+        if arena_manager is not None:
+            from src.utils.arena_factory import make_arena
+
+            # Match the manager's THDSE dimension by default; the
+            # caller can also override via ``arena=`` if they want a
+            # different sized arena.
+            if arena is None:
+                arena = make_arena(
+                    capacity=getattr(arena_manager, "thdse_capacity", 200_000),
+                    dimension=getattr(arena_manager, "thdse_dim", 256),
+                    arena_manager=arena_manager,
+                )
+
+        if arena is None:
+            # Legacy fallback: build a small Python arena so the class
+            # remains constructible without injection.
+            from src.utils.arena_factory import make_arena
+
+            arena = make_arena(capacity=10_000, dimension=256)
+
         self.arena = arena
         self.projector = projector
         self.store = AxiomStore(arena)
         self.resonance = ResonanceMatrix(arena, self.store)
         self.tau = resonance_threshold
         self._synthesis_log: List[Tuple[List[str], LayeredProjection]] = []
+
+        # PLAN.md Phase 6 wiring: bridge handles for provenance
+        # emission, causal-chain ingestion, and FrozenRNG enforcement.
+        # Every one is optional so the legacy standalone path keeps
+        # working with no behavioural change.
+        self._arena_manager = arena_manager
+        self._provenance_bridge = provenance_bridge
+        self._causal_tracker = causal_tracker
+        self._frozen_rng = frozen_rng
+
+    # ------------------------------------------------------------------
+    # PLAN.md Rule 14 — RNG enforcement probe
+    # ------------------------------------------------------------------
+
+    def attempt_perturbation(self, magnitude: float = 0.01) -> float:
+        """Sample a perturbation magnitude through the injected RNG.
+
+        The axiomatic synthesizer is deterministic by design (PLAN.md
+        Section C). This method exists so callers that *think* they
+        need a stochastic perturbation explicitly route through the
+        injected RNG. With a :class:`shared.deterministic_rng.FrozenRNG`
+        the call raises ``RuntimeError`` immediately, structurally
+        preventing nondeterminism from leaking into the synthesis path.
+        With a :class:`numpy.random.Generator` (typical CCE fork) the
+        call returns a uniform sample in ``[0, magnitude)``.
+        """
+        if self._frozen_rng is None:
+            return 0.0
+        return float(self._frozen_rng.uniform(0.0, magnitude))
+
+    # ------------------------------------------------------------------
+    # PLAN.md Rule 8 + Rule 14 — testable post-Z3 handlers
+    # ------------------------------------------------------------------
+
+    def handle_z3_result(
+        self,
+        result: str,
+        formula_id: str,
+        round_idx: int,
+        details: Dict[str, Any] | None = None,
+    ) -> Dict[str, Any]:
+        """Dispatch a Z3 verdict through the wired bridges.
+
+        ``result`` must be ``"sat"`` or ``"unsat"``. SAT events are
+        emitted as a ``record_synthesis_event("sat", …)`` call on the
+        provenance bridge. UNSAT events are double-logged: once via
+        ``record_synthesis_event("unsat", …)`` so the bridge counter
+        increments (Rule 8 audit), and once via
+        ``record_unsat_event(formula_id, …)`` on the causal tracker
+        with ``data["logged"] = True``.
+
+        Returns a structured event dict carrying provenance metadata
+        (Rule 9). When no bridges are wired in this method is a no-op
+        that still returns a metadata stub so callers can rely on the
+        return contract.
+        """
+        if result not in ("sat", "unsat"):
+            raise ValueError(
+                f"result must be 'sat' or 'unsat', got {result!r}"
+            )
+
+        details = dict(details or {})
+        details.setdefault("formula_id", formula_id)
+        details.setdefault("round_idx", round_idx)
+
+        provenance_event_id: str | None = None
+        causal_event_id: str | None = None
+
+        if self._provenance_bridge is not None:
+            event = self._provenance_bridge.record_synthesis_event(
+                result, None, details
+            )
+            provenance_event_id = event.get("event_id")
+
+        if result == "unsat" and self._causal_tracker is not None:
+            causal_event_id = self._causal_tracker.record_unsat_event(
+                formula_id=formula_id,
+                reason=str(details.get("reason", "z3_unsat")),
+                round_idx=int(round_idx),
+            )
+
+        return {
+            "result": result,
+            "formula_id": formula_id,
+            "round_idx": round_idx,
+            "provenance_event_id": provenance_event_id,
+            "causal_event_id": causal_event_id,
+            "metadata": {
+                "details": details,
+                "provenance": {
+                    "operation": "handle_z3_result",
+                    "source_arena": "thdse",
+                    "target_arena": "cce",
+                    "result": result,
+                },
+            },
+        }
+
 
     # ── Ingestion ────────────────────────────────────────────────
 

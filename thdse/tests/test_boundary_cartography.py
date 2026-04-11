@@ -7,6 +7,8 @@ All tests require hdc_core — skip gracefully if not available.
 """
 
 import math
+# PLAN.md Phase 6 wiring (Rule 3): no direct hdc_core call
+from src.utils.arena_factory import make_arena as _make_arena_compat
 import os
 import sys
 
@@ -56,7 +58,7 @@ def _make_unsat_core(arena, dimension, seed, labels=None):
 def arena_dim():
     """Create a fresh arena with dimension 128."""
     dim = 128
-    arena = hdc_core.FhrrArena(100_000, dim)
+    arena = _make_arena_compat(100_000, dim)
     return arena, dim
 
 
@@ -439,7 +441,7 @@ class TestSerialization:
         archive.serialize(filepath)
 
         # New arena for deserialization
-        arena2 = hdc_core.FhrrArena(100_000, dim)
+        arena2 = _make_arena_compat(100_000, dim)
         archive2 = WallArchive.deserialize(filepath, arena2)
 
         assert archive2.count() == 3

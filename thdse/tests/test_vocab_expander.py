@@ -5,6 +5,8 @@ projection, and activation of new atoms.
 """
 
 import os
+# PLAN.md Phase 6 wiring (Rule 3): no direct hdc_core call
+from src.utils.arena_factory import make_arena as _make_arena_compat
 import sys
 import pytest
 
@@ -25,7 +27,7 @@ DIM = 256
 @pytest.fixture
 def pipeline():
     """Set up arena, projector, vocab, and expander."""
-    arena = hdc_core.FhrrArena(500_000, DIM)
+    arena = _make_arena_compat(500_000, DIM)
     projector = IsomorphicProjector(arena, DIM)
     vocab = SubTreeVocabulary()
     # Seed vocab with a small corpus

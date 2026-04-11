@@ -5,6 +5,8 @@ garbage rejection, and stagnation detection.
 """
 
 import os
+# PLAN.md Phase 6 wiring (Rule 3): no direct hdc_core call
+from src.utils.arena_factory import make_arena as _make_arena_compat
 import sys
 import pytest
 from unittest.mock import MagicMock
@@ -29,7 +31,7 @@ CAPACITY = 2_000_000
 
 def _build_pipeline(corpus: dict, resonance_threshold: float = -1.0):
     """Build a full pipeline from a corpus dict."""
-    arena = hdc_core.FhrrArena(CAPACITY, DIM)
+    arena = _make_arena_compat(CAPACITY, DIM)
     projector = IsomorphicProjector(arena, DIM)
     synthesizer = AxiomaticSynthesizer(arena, projector, resonance_threshold=resonance_threshold)
     synthesizer.ingest_batch(corpus)

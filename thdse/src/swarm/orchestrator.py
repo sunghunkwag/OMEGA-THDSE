@@ -25,7 +25,9 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Set, Tuple
 
-import hdc_core
+# PLAN.md Phase 6 wiring (Rule 3): arena allocation now flows through
+# arena_factory.make_arena rather than ``hdc_core.FhrrArena`` directly.
+from src.utils.arena_factory import make_arena
 
 from src.decoder.constraint_decoder import ConstraintDecoder
 from src.decoder.subtree_vocab import SubTreeVocabulary
@@ -122,15 +124,47 @@ class SwarmResult:
 class SwarmOrchestrator:
     """Orchestrates the THDSE-Swarm collective intelligence loop."""
 
-    def __init__(self, config: SwarmConfig):
+    def __init__(
+        self,
+        config: SwarmConfig,
+        *,
+        arena_manager: Any = None,
+        goal_synthesis_bridge: Any = None,
+        world_model_swarm_bridge: Any = None,
+        governance_bridge: Any = None,
+        axiom_skill_bridge: Any = None,
+        provenance_bridge: Any = None,
+    ):
         """Initialize the orchestrator and all agents.
 
         Creates N ThdseAgent instances, each with its assigned corpus.
         Also creates the orchestrator's own arena/decoder for consensus
         decoding (separate from agent arenas).
+
+        PLAN.md Phase 6 wiring: every cross-engine bridge handle is
+        accepted via keyword. The bridges are owned by the **main**
+        orchestrator process only — Rule 11 forbids passing them to
+        worker processes spawned via :class:`ProcessPoolExecutor`. The
+        worker function (:func:`_agent_synthesis_worker`) receives only
+        plain serializable primitives (config dataclass + dicts +
+        lists), never the orchestrator instance or its bridges.
         """
         self.config = config
         self.agents: List[ThdseAgent] = []
+
+        # PLAN.md Phase 6 wiring: store the injected bridges so the
+        # orchestrator's pre-round and post-consensus hooks can call
+        # them. Each handle defaults to None for backward compat.
+        self._arena_manager = arena_manager
+        self._goal_synthesis_bridge = goal_synthesis_bridge
+        self._world_model_swarm_bridge = world_model_swarm_bridge
+        self._governance_bridge = governance_bridge
+        self._axiom_skill_bridge = axiom_skill_bridge
+        self._provenance_bridge = provenance_bridge
+        # Counters for Tier-1 verification.
+        self._goal_inject_calls = 0
+        self._consensus_check_calls = 0
+        self._registration_attempts = 0
 
         # Validate corpus_paths length
         if len(config.corpus_paths) != config.n_agents:
@@ -150,14 +184,24 @@ class SwarmOrchestrator:
                         "and degrade collective intelligence.", i, j,
                     )
 
-        # Create agents
+        # Create agents — pass the manager so each agent can use the
+        # Rust-backed arena when available.
         for i in range(config.n_agents):
-            agent = ThdseAgent(i, config, config.corpus_paths[i])
+            agent = ThdseAgent(
+                i,
+                config,
+                config.corpus_paths[i],
+                arena_manager=arena_manager,
+            )
             self.agents.append(agent)
 
-        # Orchestrator's own arena for consensus decoding
-        self._consensus_arena = hdc_core.FhrrArena(
-            config.arena_capacity, config.dimension,
+        # PLAN.md Phase 6 wiring: orchestrator-level consensus arena
+        # comes from arena_factory rather than a direct hdc_core call
+        # (Rule 3).
+        self._consensus_arena = make_arena(
+            config.arena_capacity,
+            config.dimension,
+            arena_manager=arena_manager,
         )
         self._consensus_projector = IsomorphicProjector(
             self._consensus_arena, config.dimension,
@@ -182,6 +226,133 @@ class SwarmOrchestrator:
         self._agent_wall_history: List[List[List[float]]] = [
             [] for _ in range(config.n_agents)
         ]
+
+    # ------------------------------------------------------------------
+    # PLAN.md Phase 6 — testable pre/post hooks (Rule 14)
+    # ------------------------------------------------------------------
+
+    def pre_round_goal_injection(
+        self, candidate_goals: List[Dict[str, Any]]
+    ) -> List[Dict[str, Any]]:
+        """Rank ``candidate_goals`` through :class:`GoalSynthesisBridge`.
+
+        ``candidate_goals`` is a list of dicts that already carry
+        ``priority`` and ``projected_similarity`` fields (the typical
+        output of :meth:`GoalSynthesisBridge.goal_to_synthesis_target`).
+        Returns the ranked list with rank metadata attached. When no
+        bridge is wired this is a no-op that returns the input list
+        unchanged with a ``rank`` field assigned by insertion order.
+        """
+        self._goal_inject_calls += 1
+        if not candidate_goals:
+            return []
+        if self._goal_synthesis_bridge is None:
+            ranked = []
+            for idx, goal in enumerate(candidate_goals, start=1):
+                item = dict(goal)
+                item["rank"] = idx
+                ranked.append(item)
+            return ranked
+        return self._goal_synthesis_bridge.rank_goals(candidate_goals)
+
+    def post_consensus_handle(
+        self,
+        consensus_phases: List[float],
+        consensus_source: Optional[str],
+        fitness: float,
+        round_idx: int,
+    ) -> Dict[str, Any]:
+        """Drive the consensus result through the post-Z3 governance path.
+
+        Steps:
+        1. Ask :class:`WorldModelSwarmBridge.incorporate_swarm_consensus`
+           whether CCE should adopt the consensus.
+        2. If adopted AND a consensus source decoded, run governance
+           via :class:`GovernanceSynthesisBridge.evaluate_candidate`.
+        3. If governance approves, register through
+           :class:`AxiomSkillBridge.validate_and_register`.
+        4. Always emit a provenance event when ``provenance_bridge`` is
+           wired so the causal chain stays complete.
+        """
+        self._consensus_check_calls += 1
+        adopt_decision: Dict[str, Any] = {}
+        approved = False
+        registered = False
+
+        if self._world_model_swarm_bridge is not None and consensus_phases:
+            adopt_decision = (
+                self._world_model_swarm_bridge.incorporate_swarm_consensus(
+                    list(consensus_phases)
+                )
+            )
+
+        should_adopt = bool(adopt_decision.get("should_adopt", True))
+
+        if (
+            should_adopt
+            and consensus_source
+            and consensus_source.strip()
+            and self._governance_bridge is not None
+        ):
+            verdict = self._governance_bridge.evaluate_candidate(
+                consensus_source, 0, float(fitness)
+            )
+            approved = self._governance_bridge.gate_registration(verdict)
+
+            if approved and self._axiom_skill_bridge is not None:
+                self._registration_attempts += 1
+                skill_name = f"swarm_consensus_round_{round_idx}"
+                try:
+                    reg = self._axiom_skill_bridge.validate_and_register(
+                        axiom_handle=0,
+                        program_source=consensus_source,
+                        skill_name=skill_name,
+                        governance_approved=True,
+                    )
+                    registered = bool(reg.get("registered"))
+                except Exception:  # noqa: BLE001 — recorded below
+                    registered = False
+
+        if self._provenance_bridge is not None:
+            self._provenance_bridge.record_synthesis_event(
+                "swarm_consensus",
+                None,
+                {
+                    "round_idx": round_idx,
+                    "should_adopt": should_adopt,
+                    "approved": approved,
+                    "registered": registered,
+                },
+            )
+
+        return {
+            "should_adopt": should_adopt,
+            "approved": approved,
+            "registered": registered,
+            "metadata": {
+                "round_idx": round_idx,
+                "adopt_decision": adopt_decision,
+                "consensus_check_calls": self._consensus_check_calls,
+                "registration_attempts": self._registration_attempts,
+                "provenance": {
+                    "operation": "post_consensus_handle",
+                    "source_arena": "thdse",
+                    "target_arena": "cce",
+                },
+            },
+        }
+
+    @property
+    def goal_inject_calls(self) -> int:
+        return self._goal_inject_calls
+
+    @property
+    def consensus_check_calls(self) -> int:
+        return self._consensus_check_calls
+
+    @property
+    def registration_attempts(self) -> int:
+        return self._registration_attempts
 
     def _build_merged_vocab(self) -> None:
         """Merge SubTreeVocabulary from ALL agents into the orchestrator's decoder.
@@ -260,9 +431,12 @@ class SwarmOrchestrator:
             wall_target_agents: List[int] = []
 
             if len(baseline_candidates) >= 2:
-                # Create temporary arena for consensus
-                tmp_arena = hdc_core.FhrrArena(
-                    max(len(baseline_candidates) * 5 + 50, 200), self.config.dimension,
+                # Create temporary arena for consensus via the
+                # arena_factory (Rule 3): no direct hdc_core call.
+                tmp_arena = make_arena(
+                    max(len(baseline_candidates) * 5 + 50, 200),
+                    self.config.dimension,
+                    arena_manager=self._arena_manager,
                 )
 
                 candidate_phases = [msg.phases for msg in baseline_candidates]

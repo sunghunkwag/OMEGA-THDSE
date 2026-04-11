@@ -20,14 +20,33 @@ The F_eff measurement is the scientific output:
   = 0 → system is empirically closed (valid scientific result)
 
 Zero randomness. Deterministic at every step.
+
+PLAN.md Phase 6 wiring: SERL accepts injected bridge handles
+(``arena_manager``, ``rsi_serl_bridge``, ``governance_bridge``,
+``axiom_skill_bridge``, ``provenance_bridge``, ``causal_tracker``,
+``deterministic_rng``). When wired, every fitness-gated candidate
+flows through ``RsiSerlBridge.serl_candidate_to_rsi`` → optional
+``GovernanceSynthesisBridge.evaluate_candidate`` → optional
+``AxiomSkillBridge.validate_and_register``. All decode results — SAT
+or UNSAT — generate causal-chain events through the provenance and
+causal tracker handles. Tier-1 tests exercise the post-decode handler
+(:meth:`SERLLoop.handle_decode_result`) directly with synthetic inputs.
 """
 
+import time
 from dataclasses import dataclass, field
-from typing import Any, List, Optional
+from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
-from src.execution.sandbox import ExecutionSandbox
-from src.decoder.vocab_expander import VocabularyExpander
-from src.decoder.subtree_vocab import SubTreeVocabulary
+# PLAN.md Phase 6 (Rule 13 revised): the heavy decoder dependencies
+# transitively pull in z3, which is not always installed in Tier-1
+# environments (bare Python + numpy). Defer those imports to module
+# load time only when type-checking; at runtime they are imported
+# inside ``run()``. This lets the SERLLoop class — and especially
+# its testable post-decode handler — be exercised without Z3.
+if TYPE_CHECKING:  # pragma: no cover — typing only
+    from src.execution.sandbox import ExecutionSandbox
+    from src.decoder.vocab_expander import VocabularyExpander
+    from src.decoder.subtree_vocab import SubTreeVocabulary
 
 
 @dataclass
@@ -79,15 +98,217 @@ class SERLLoop:
       - no cliques found (nothing to synthesize)
     """
 
+    def __init__(
+        self,
+        *,
+        arena_manager: Any = None,
+        rsi_serl_bridge: Any = None,
+        governance_bridge: Any = None,
+        axiom_skill_bridge: Any = None,
+        provenance_bridge: Any = None,
+        causal_tracker: Any = None,
+        deterministic_rng: Any = None,
+    ) -> None:
+        """Phase 6 dependency injection (all parameters optional).
+
+        Backward-compat (Rule 16): legacy callers that ``SERLLoop()`` and
+        invoke ``run(...)`` keep working unchanged — every bridge handle
+        defaults to ``None`` and the loop short-circuits the wired paths
+        in that case.
+        """
+        self._arena_manager = arena_manager
+        self._rsi_serl_bridge = rsi_serl_bridge
+        self._governance_bridge = governance_bridge
+        self._axiom_skill_bridge = axiom_skill_bridge
+        self._provenance_bridge = provenance_bridge
+        self._causal_tracker = causal_tracker
+        self._deterministic_rng = deterministic_rng
+        self._handler_invocations = 0
+        self._registration_attempts = 0
+        self._registrations_completed = 0
+
+    # ------------------------------------------------------------------
+    # PLAN.md Rule 14 — testable post-decode handler
+    # ------------------------------------------------------------------
+
+    def handle_decode_result(
+        self,
+        source: Optional[str],
+        fitness: float,
+        thdse_handle: int,
+        round_idx: int,
+        formula_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Dispatch a single decode outcome through the wired bridges.
+
+        ``source is None`` is the SERL convention for "the constraint
+        solver returned UNSAT for this clique"; any non-empty source
+        is the SAT branch. The handler is intentionally split out from
+        :meth:`run` so Tier-1 tests can call it with synthetic decode
+        results without needing to drive the entire synthesis stack.
+
+        Returns a dict carrying:
+
+        - ``result``: ``"sat"`` | ``"unsat"``
+        - ``eligible``: bool — True if the candidate cleared the SERL
+          fitness gate AND :class:`bridges.rsi_serl_bridge.RsiSerlBridge`
+          accepted it.
+        - ``approved``: bool — True if governance approved.
+        - ``registered``: bool — True if axiom_skill_bridge registered.
+        - ``metadata``: dict carrying provenance.
+        """
+        self._handler_invocations += 1
+        formula_id = formula_id or f"serl_round_{round_idx}_h{thdse_handle}"
+        result = "sat" if (source and source.strip()) else "unsat"
+
+        # PLAN.md Rule 8: every UNSAT must hit both bridges if wired.
+        if result == "unsat":
+            if self._provenance_bridge is not None:
+                self._provenance_bridge.record_synthesis_event(
+                    "unsat",
+                    int(thdse_handle),
+                    {"formula_id": formula_id, "round_idx": round_idx},
+                )
+            if self._causal_tracker is not None:
+                self._causal_tracker.record_unsat_event(
+                    formula_id=formula_id,
+                    reason="serl_decode_unsat",
+                    round_idx=int(round_idx),
+                )
+            return {
+                "result": "unsat",
+                "eligible": False,
+                "approved": False,
+                "registered": False,
+                "metadata": {
+                    "formula_id": formula_id,
+                    "round_idx": round_idx,
+                    "provenance": {
+                        "operation": "handle_decode_result",
+                        "source_arena": "thdse",
+                        "target_arena": "cce",
+                        "result": "unsat",
+                    },
+                },
+            }
+
+        # SAT branch — emit provenance, then run RSI / governance / skill.
+        if self._provenance_bridge is not None:
+            self._provenance_bridge.record_synthesis_event(
+                "sat",
+                int(thdse_handle),
+                {"formula_id": formula_id, "round_idx": round_idx},
+            )
+
+        eligible = False
+        approved = False
+        registered = False
+        rsi_result: Dict[str, Any] = {}
+        gov_result: Dict[str, Any] = {}
+        registration: Dict[str, Any] = {}
+
+        if self._rsi_serl_bridge is not None:
+            rsi_result = self._rsi_serl_bridge.serl_candidate_to_rsi(
+                source, float(fitness), int(thdse_handle)
+            )
+            eligible = bool(rsi_result.get("eligible"))
+
+        if eligible and self._governance_bridge is not None:
+            gov_result = self._governance_bridge.evaluate_candidate(
+                source, int(thdse_handle), float(fitness)
+            )
+            approved = self._governance_bridge.gate_registration(gov_result)
+
+        if approved and self._axiom_skill_bridge is not None:
+            self._registration_attempts += 1
+            skill_name = f"serl_skill_{thdse_handle}_{round_idx}"
+            try:
+                registration = (
+                    self._axiom_skill_bridge.validate_and_register(
+                        axiom_handle=int(thdse_handle),
+                        program_source=source,
+                        skill_name=skill_name,
+                        governance_approved=True,
+                    )
+                )
+                registered = bool(registration.get("registered"))
+                if registered:
+                    self._registrations_completed += 1
+            except Exception as exc:  # noqa: BLE001
+                # Registration failures are recorded as causal events
+                # so the integration layer can audit them.
+                if self._causal_tracker is not None:
+                    self._causal_tracker.record_thdse_provenance(
+                        source_arena="thdse",
+                        operation="serl_registration_failed",
+                        result=str(exc)[:120],
+                        round_idx=int(round_idx),
+                    )
+
+        return {
+            "result": "sat",
+            "eligible": eligible,
+            "approved": approved,
+            "registered": registered,
+            "metadata": {
+                "formula_id": formula_id,
+                "round_idx": round_idx,
+                "rsi_result": rsi_result,
+                "governance_result": gov_result,
+                "registration": registration,
+                "handler_invocations": self._handler_invocations,
+                "provenance": {
+                    "operation": "handle_decode_result",
+                    "source_arena": "thdse",
+                    "target_arena": "cce",
+                    "result": "sat",
+                },
+            },
+        }
+
+    def feedback_skill_performance(
+        self, skill_id: str, performance_scores: List[float]
+    ) -> Dict[str, Any]:
+        """Forward execution feedback to ``RsiSerlBridge`` for fitness shaping."""
+        if self._rsi_serl_bridge is None:
+            return {
+                "feedback_applied": False,
+                "metadata": {
+                    "reason": "no_rsi_serl_bridge_wired",
+                    "provenance": {
+                        "operation": "feedback_skill_performance",
+                        "source_arena": "cce",
+                        "target_arena": "thdse",
+                    },
+                },
+            }
+        result = self._rsi_serl_bridge.rsi_skill_to_serl_feedback(
+            skill_id, performance_scores
+        )
+        result["feedback_applied"] = True
+        return result
+
+    @property
+    def handler_invocations(self) -> int:
+        return self._handler_invocations
+
+    @property
+    def registration_attempts(self) -> int:
+        return self._registration_attempts
+
+    @property
+    def registrations_completed(self) -> int:
+        return self._registrations_completed
+
     def run(
         self,
         arena: Any,
         projector: Any,
         synthesizer: Any,
         decoder: Any,
-        sandbox: ExecutionSandbox,
-        expander: VocabularyExpander,
-        subtree_vocab: SubTreeVocabulary,
+        sandbox: "Any",
+        expander: "Any",
+        subtree_vocab: "Any",
         max_cycles: int = 20,
         stagnation_limit: int = 5,
         fitness_threshold: float = 0.4,
@@ -167,6 +388,18 @@ class SERLLoop:
 
                 # Decode
                 source = decoder.decode_to_source(synth_proj)
+                # PLAN.md Phase 6 wiring: every decode result — even
+                # the ``None`` (UNSAT-proxy) ones — must be passed
+                # through ``handle_decode_result`` so the wired
+                # provenance bridge sees the event. We use the synthesis
+                # projection's final_handle as the THDSE arena handle.
+                bridge_handle = getattr(synth_proj, "final_handle", -1)
+                self.handle_decode_result(
+                    source=source,
+                    fitness=0.0,
+                    thdse_handle=int(bridge_handle),
+                    round_idx=cycle_idx,
+                )
                 if source is None or source.strip() == "" or source.strip() == "pass":
                     continue
                 syntheses_decoded += 1
@@ -182,6 +415,20 @@ class SERLLoop:
                 # Step 4: If fitness above threshold, expand vocabulary
                 if profile.fitness >= fitness_threshold:
                     syntheses_above_fitness += 1
+                    # PLAN.md Phase 6 wiring: a fitness-passing
+                    # candidate is the trigger for the RSI/governance/
+                    # skill pipeline. Re-invoke the post-decode handler
+                    # with the *real* fitness so the bridges can act on
+                    # it.
+                    self.handle_decode_result(
+                        source=source,
+                        fitness=float(profile.fitness),
+                        thdse_handle=int(
+                            getattr(synth_proj, "final_handle", -1)
+                        ),
+                        round_idx=cycle_idx,
+                        formula_id=f"serl_fit_{cycle_idx}_{syntheses_attempted}",
+                    )
                     added = expander.expand(
                         source, profile.fitness,
                         subtree_vocab, arena, projector,

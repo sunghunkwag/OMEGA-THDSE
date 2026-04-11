@@ -9,6 +9,8 @@ Tests:
 """
 
 import math
+# PLAN.md Phase 6 wiring (Rule 3): no direct hdc_core call
+from src.utils.arena_factory import make_arena as _make_arena_compat
 import os
 import sys
 
@@ -39,7 +41,7 @@ def _deterministic_phases(seed: int, dimension: int):
 @pytest.fixture
 def arena_dim():
     dim = 128
-    arena = hdc_core.FhrrArena(100_000, dim)
+    arena = _make_arena_compat(100_000, dim)
     return arena, dim
 
 

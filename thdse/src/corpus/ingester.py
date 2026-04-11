@@ -6,6 +6,8 @@ a persistent AxiomStore.
 """
 
 import os
+# PLAN.md Phase 6 wiring (Rule 3): no direct hdc_core call
+from src.utils.arena_factory import make_arena as _make_arena_compat
 import sys
 import time
 import pickle
@@ -66,7 +68,7 @@ class BatchIngester:
 
     Usage:
         import hdc_core
-        arena = hdc_core.FhrrArena(1_000_000, 256)
+        arena = _make_arena_compat(1_000_000, 256)
         proj = IsomorphicProjector(arena, 256)
         synth = AxiomaticSynthesizer(arena, proj)
         ingester = BatchIngester(synth)

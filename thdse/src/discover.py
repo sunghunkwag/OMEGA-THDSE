@@ -12,6 +12,8 @@ Usage:
 """
 
 import argparse
+# PLAN.md Phase 6 wiring (Rule 3): no direct hdc_core call
+from src.utils.arena_factory import make_arena as _make_arena_compat
 import json
 import os
 import sys
@@ -36,7 +38,7 @@ def _init_pipeline(args):
     from src.projection.isomorphic_projector import IsomorphicProjector
     from src.synthesis.axiomatic_synthesizer import AxiomaticSynthesizer
 
-    arena = hdc_core.FhrrArena(args.capacity, args.dimension)
+    arena = _make_arena_compat(args.capacity, args.dimension)
     projector = IsomorphicProjector(arena, args.dimension)
     synthesizer = AxiomaticSynthesizer(
         arena, projector, resonance_threshold=args.threshold,

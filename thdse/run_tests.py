@@ -13,6 +13,8 @@ Covers all modules including Singularity Expansion mechanisms:
   9. thermodynamics — Entropy-constrained synthesis ranking
 """
 import sys
+# PLAN.md Phase 6 wiring (Rule 3): no direct hdc_core call
+from src.utils.arena_factory import make_arena as _make_arena_compat
 import os
 import math
 
@@ -62,7 +64,7 @@ def test_hdc_core():
         return False
 
     dim = 128
-    arena = hdc_core.FhrrArena(16, dim)
+    arena = _make_arena_compat(16, dim)
     h1 = arena.allocate()
     h2 = arena.allocate()
     h3 = arena.allocate()
@@ -98,7 +100,7 @@ def test_arena_ops():
     from src.utils.arena_ops import conjugate_into, bind_phases, bundle_phases, negate_phases
 
     dim = 256
-    arena = hdc_core.FhrrArena(32, dim)
+    arena = _make_arena_compat(32, dim)
 
     # Create a vector with known phases
     phases = [0.5 * i / dim * math.pi for i in range(dim)]
@@ -150,7 +152,7 @@ def test_isomorphic_projector():
     from src.projection.isomorphic_projector import IsomorphicProjector, LayeredProjection
 
     dim = 256
-    arena = hdc_core.FhrrArena(100_000, dim)
+    arena = _make_arena_compat(100_000, dim)
     proj = IsomorphicProjector(arena, dim)
 
     code_a = "def foo(x):\n    return x + 1\n"
@@ -196,7 +198,7 @@ def test_axiomatic_synthesizer():
     from src.synthesis.axiomatic_synthesizer import AxiomaticSynthesizer
 
     dim = 256
-    arena = hdc_core.FhrrArena(200_000, dim)
+    arena = _make_arena_compat(200_000, dim)
     proj = IsomorphicProjector(arena, dim)
     # Low threshold ensures clique formation (high-d VSA has low cross-correlation)
     synth = AxiomaticSynthesizer(arena, proj, resonance_threshold=-1.0)
@@ -242,7 +244,7 @@ def test_constraint_decoder():
     from src.decoder.constraint_decoder import ConstraintDecoder
 
     dim = 256
-    arena = hdc_core.FhrrArena(500_000, dim)
+    arena = _make_arena_compat(500_000, dim)
     proj = IsomorphicProjector(arena, dim)
     decoder = ConstraintDecoder(arena, proj, dim,
                                 activation_threshold=0.04,
@@ -293,7 +295,7 @@ def test_full_pipeline():
     from src.decoder.constraint_decoder import ConstraintDecoder
 
     dim = 256
-    arena = hdc_core.FhrrArena(500_000, dim)
+    arena = _make_arena_compat(500_000, dim)
     proj = IsomorphicProjector(arena, dim)
     # Use very low resonance threshold to guarantee clique formation
     # (cross-correlations at d=256 are near zero for distinct code)
@@ -334,7 +336,7 @@ def test_meta_grammar_emergence():
     import numpy as np
 
     dim = 128
-    arena = hdc_core.FhrrArena(64, dim)
+    arena = _make_arena_compat(64, dim)
 
     # Allocate and inject test vectors
     h1 = arena.allocate()
@@ -393,7 +395,7 @@ def test_autopoietic_self_reference():
     from src.synthesis.axiomatic_synthesizer import AxiomaticSynthesizer
 
     dim = 256
-    arena = hdc_core.FhrrArena(500_000, dim)
+    arena = _make_arena_compat(500_000, dim)
     proj = IsomorphicProjector(arena, dim)
     synth = AxiomaticSynthesizer(arena, proj, resonance_threshold=0.01)
 
@@ -440,7 +442,7 @@ def test_topological_thermodynamics():
     from src.utils.arena_ops import compute_phase_entropy, compute_operation_entropy
 
     dim = 256
-    arena = hdc_core.FhrrArena(500_000, dim)
+    arena = _make_arena_compat(500_000, dim)
     proj = IsomorphicProjector(arena, dim)
     synth = AxiomaticSynthesizer(arena, proj, resonance_threshold=-1.0)
 
@@ -508,7 +510,7 @@ def test_quotient_space_folding():
 
     # ── Part A: Test the Rust project_to_quotient_space directly ──
     dim = 128
-    arena = hdc_core.FhrrArena(32, dim)
+    arena = _make_arena_compat(32, dim)
 
     # Create V_error and two test vectors
     h_error = arena.allocate()
@@ -558,7 +560,7 @@ def test_quotient_space_folding():
     from src.projection.isomorphic_projector import IsomorphicProjector
 
     dim2 = 256
-    arena2 = hdc_core.FhrrArena(500_000, dim2)
+    arena2 = _make_arena_compat(500_000, dim2)
     proj = IsomorphicProjector(arena2, dim2)
 
     # Create some atom handles to simulate conflicting atoms
@@ -590,7 +592,7 @@ def test_quotient_space_folding():
     # ── Part C: Full pipeline integration — UNSAT core + quotient folding ──
     from src.decoder.constraint_decoder import ConstraintDecoder, UnsatCoreResult
 
-    arena3 = hdc_core.FhrrArena(500_000, dim2)
+    arena3 = _make_arena_compat(500_000, dim2)
     proj3 = IsomorphicProjector(arena3, dim2)
     decoder = ConstraintDecoder(arena3, proj3, dim2,
                                 activation_threshold=0.04,
@@ -631,7 +633,7 @@ def test_singularity_expansion():
     from src.decoder.constraint_decoder import ConstraintDecoder
 
     dim = 256
-    arena = hdc_core.FhrrArena(500_000, dim)
+    arena = _make_arena_compat(500_000, dim)
     proj = IsomorphicProjector(arena, dim)
     synth = AxiomaticSynthesizer(arena, proj, resonance_threshold=-1.0)
     decoder = ConstraintDecoder(arena, proj, dim,
@@ -700,7 +702,7 @@ def test_stdlib_discovery():
     from src.analysis.resonance_analyzer import ResonanceAnalyzer
 
     dim = 256
-    arena = hdc_core.FhrrArena(2_000_000, dim)
+    arena = _make_arena_compat(2_000_000, dim)
     projector = IsomorphicProjector(arena, dim)
     synthesizer = AxiomaticSynthesizer(arena, projector, resonance_threshold=0.15)
 

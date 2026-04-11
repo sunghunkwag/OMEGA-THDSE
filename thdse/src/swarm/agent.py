@@ -17,7 +17,9 @@ Communication is via phase arrays only:
 import os
 from typing import Any, Dict, List, Optional
 
-import hdc_core
+# PLAN.md Phase 6 wiring (Rule 3): the arena now comes through the
+# arena_factory helper rather than the direct hdc_core constructor.
+from src.utils.arena_factory import make_arena
 
 from src.projection.isomorphic_projector import IsomorphicProjector
 from src.synthesis.axiomatic_synthesizer import AxiomaticSynthesizer
@@ -47,6 +49,8 @@ class ThdseAgent:
         agent_id: int,
         config: SwarmConfig,
         corpus_paths: List[str],
+        *,
+        arena_manager: Any = None,
     ):
         """Initialize a complete THDSE pipeline for this agent.
 
@@ -55,13 +59,26 @@ class ThdseAgent:
             config: Shared swarm configuration.
             corpus_paths: Directories to ingest as this agent's corpus.
                          MUST be different from other agents' corpora.
+            arena_manager: Optional :class:`shared.arena_manager.ArenaManager`
+                instance. When provided AND its backend is the Rust
+                crate, the agent borrows the manager-owned arena
+                instead of constructing a private one. Otherwise the
+                arena_factory falls back to ``_PyFhrrArenaExtended``.
+                PLAN.md Rule 11 forbids passing this object across
+                process boundaries — see :func:`_agent_synthesis_worker`.
         """
         self.agent_id = agent_id
         self.config = config
         self.corpus_paths = corpus_paths
+        self._arena_manager = arena_manager
 
-        # Each agent owns its own arena — NOT shared
-        self.arena = hdc_core.FhrrArena(config.arena_capacity, config.dimension)
+        # PLAN.md Phase 6 wiring: arena comes from the factory, not
+        # from a direct Rust-arena constructor call (Rule 3).
+        self.arena = make_arena(
+            config.arena_capacity,
+            config.dimension,
+            arena_manager=arena_manager,
+        )
         self.projector = IsomorphicProjector(self.arena, config.dimension)
         self.synthesizer = AxiomaticSynthesizer(
             self.arena, self.projector, resonance_threshold=0.15,

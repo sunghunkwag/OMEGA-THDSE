@@ -7,6 +7,8 @@ Tests:
   4. test_all_existing_tests_still_pass — Regression guard
 """
 import ast
+# PLAN.md Phase 6 wiring (Rule 3): no direct hdc_core call
+from src.utils.arena_factory import make_arena as _make_arena_compat
 import sys
 import os
 
@@ -14,7 +16,10 @@ import pytest
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-import hdc_core
+try:
+    import hdc_core  # noqa: F401  # optional Rust backend
+except ImportError:
+    hdc_core = None  # type: ignore[assignment]
 from src.projection.isomorphic_projector import IsomorphicProjector
 from src.decoder.constraint_decoder import (
     ConstraintDecoder, DecodedConstraints, _STATEMENT_TYPES,
@@ -25,7 +30,7 @@ from src.decoder.constraint_decoder import (
 def shared_pipeline():
     """Set up a shared arena/projector/decoder for nesting tests."""
     dim = 256
-    arena = hdc_core.FhrrArena(500_000, dim)
+    arena = _make_arena_compat(500_000, dim)
     projector = IsomorphicProjector(arena, dim)
     decoder = ConstraintDecoder(
         arena, projector, dim,
@@ -105,7 +110,7 @@ def test_loop_body_nested(shared_pipeline):
 def test_flat_fallback():
     """When nesting constraints cause UNSAT, decoder falls back to flat placement."""
     dim = 256
-    arena = hdc_core.FhrrArena(100_000, dim)
+    arena = _make_arena_compat(100_000, dim)
     projector = IsomorphicProjector(arena, dim)
     decoder = ConstraintDecoder(
         arena, projector, dim,
