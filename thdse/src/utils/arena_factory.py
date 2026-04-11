@@ -227,6 +227,88 @@ class _PyFhrrArenaExtended:
         bind_count, bundle_count = self._op_counts[handle]
         self._op_counts[handle] = (bind_count, bundle_count + int(fan_in))
 
+    # ---- quotient space projection (PLAN.md Phase 8B / Rule 22) ---- #
+
+    def project_to_quotient_space(self, v_error_id: int) -> int:
+        """Project every other live handle away from ``v_error_id``.
+
+        Phase-space port of the Rust ``project_to_quotient_space``
+        scalar implementation. For each handle ``h`` (except v_error
+        itself), we:
+
+        1. Convert ``v_error`` and ``X`` from phases to complex (cos, sin).
+        2. Compute the complex inner product ``<V, X>``.
+        3. Compute coeff = ``<V, X> / |V|²``.
+        4. Subtract ``V * coeff`` from ``X``.
+        5. Renormalize each component to unit magnitude.
+        6. Convert back to phases via ``atan2``.
+
+        Returns the number of handles that were modified. The output
+        matches the Rust crate within float32 tolerance.
+        """
+        self._validate_handle(v_error_id)
+        v_phases = self._phases[v_error_id]
+        if v_phases is None:
+            return 0
+
+        v_re = [math.cos(p) for p in v_phases]
+        v_im = [math.sin(p) for p in v_phases]
+        norm_sq = sum(
+            v_re[j] * v_re[j] + v_im[j] * v_im[j]
+            for j in range(self._dimension)
+        )
+        if norm_sq < 1e-12:
+            return 0
+        inv_norm_sq = 1.0 / norm_sq
+
+        projected_count = 0
+        for h in range(self._head):
+            if h == v_error_id:
+                continue
+            x_phases = self._phases[h]
+            if x_phases is None:
+                continue
+
+            x_re = [math.cos(p) for p in x_phases]
+            x_im = [math.sin(p) for p in x_phases]
+
+            dot_re = sum(
+                v_re[j] * x_re[j] + v_im[j] * x_im[j]
+                for j in range(self._dimension)
+            )
+            dot_im = sum(
+                v_re[j] * x_im[j] - v_im[j] * x_re[j]
+                for j in range(self._dimension)
+            )
+            coeff_re = dot_re * inv_norm_sq
+            coeff_im = dot_im * inv_norm_sq
+            if coeff_re * coeff_re + coeff_im * coeff_im < 1e-16:
+                continue
+
+            new_phases: List[float] = []
+            for j in range(self._dimension):
+                proj_re = v_re[j] * coeff_re - v_im[j] * coeff_im
+                proj_im = v_re[j] * coeff_im + v_im[j] * coeff_re
+                xr = x_re[j] - proj_re
+                xi = x_im[j] - proj_im
+                mag = math.sqrt(xr * xr + xi * xi)
+                if mag > 1e-12:
+                    xr /= mag
+                    xi /= mag
+                new_phases.append(math.atan2(xi, xr) % _TWO_PI)
+            self._phases[h] = new_phases
+            projected_count += 1
+        return projected_count
+
+    def project_to_multi_quotient_space(
+        self, v_error_ids: Sequence[int]
+    ) -> int:
+        """Repeatedly project away from each error vector in turn."""
+        total = 0
+        for v_id in v_error_ids:
+            total += self.project_to_quotient_space(int(v_id))
+        return total
+
     # ---- internal ---- #
 
     def _validate_handle(self, handle: int) -> None:

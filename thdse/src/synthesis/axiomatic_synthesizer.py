@@ -27,6 +27,7 @@ Mathematical foundation:
 """
 
 import json
+import math
 import os
 from typing import Any, Dict, List, Tuple, Optional
 from dataclasses import dataclass, field
@@ -43,6 +44,11 @@ class Axiom:
     """An axiom vector with provenance metadata and layered projection."""
     projection: LayeredProjection
     source_id: str
+    # PLAN.md Phase 8A.2: optional behavioral profile capturing what
+    # the axiom's source actually does (vs. how it looks). When
+    # present, dual-axis resonance can blend structural and
+    # behavioral similarity.
+    behavioral: Optional[Any] = None
     resonance_profile: Dict[str, float] = field(default_factory=dict)
 
     @property
@@ -78,12 +84,50 @@ class ResonanceMatrix:
 
     Uses final_handle (cross-layer bound) for resonance — this captures
     the full structural similarity including cross-layer interactions.
+
+    PLAN.md Phase 8A.3 — dual-axis resonance: when both axioms carry a
+    behavioral profile, the matrix entry is a weighted blend of
+    structural and behavioral similarity:
+
+        ρ(A, B) = α · structural_sim + (1 − α) · behavioral_sim
+
+    Default α = 0.5. Set ``alpha=1.0`` for legacy structural-only
+    behaviour. When either axiom is missing a behavioral profile the
+    behavioural term is treated as 0.0 — falling back to a pure
+    structural correlation scaled by α.
     """
 
-    def __init__(self, arena: Any, store: AxiomStore):
+    def __init__(self, arena: Any, store: AxiomStore, alpha: float = 0.5):
         self.arena = arena
         self.store = store
+        if not 0.0 <= alpha <= 1.0:
+            raise ValueError(f"alpha must be in [0, 1], got {alpha}")
+        self.alpha = float(alpha)
         self._matrix: Dict[Tuple[str, str], float] = {}
+
+    @staticmethod
+    def _behavioral_similarity(ax_a: "Axiom", ax_b: "Axiom") -> float:
+        """Compute mean-cosine FHRR similarity on stored behavioral phases.
+
+        Returns 0.0 if either axiom has no behavioral profile so the
+        dual-axis blend degrades gracefully to a pure structural
+        score weighted by ``alpha``.
+        """
+        if ax_a.behavioral is None or ax_b.behavioral is None:
+            return 0.0
+        a = getattr(ax_a.behavioral, "behavioral_phases", None)
+        b = getattr(ax_b.behavioral, "behavioral_phases", None)
+        if not a or not b or len(a) != len(b):
+            return 0.0
+        n = len(a)
+        return float(sum(math.cos(a[i] - b[i]) for i in range(n)) / n)
+
+    def _blend(
+        self, structural: float, ax_a: "Axiom", ax_b: "Axiom"
+    ) -> float:
+        """Blend structural and behavioral similarity per dual-axis rule."""
+        behavioral = self._behavioral_similarity(ax_a, ax_b)
+        return self.alpha * float(structural) + (1.0 - self.alpha) * behavioral
 
     def compute_full(self) -> Dict[Tuple[str, str], float]:
         self._matrix.clear()
@@ -96,37 +140,24 @@ class ResonanceMatrix:
         handles = [self.store.axioms[sid].handle for sid in ids]
         has_batch = hasattr(self.arena, 'correlate_matrix')
 
-        if has_batch and n >= 2:
-            flat = self.arena.correlate_matrix(handles)
-            # Unpack flat upper-triangle into symmetric dict
-            k = 0
-            for i in range(n):
-                id_a = ids[i]
-                ax_a = self.store.axioms[id_a]
-                # Self-correlation
-                self._matrix[(id_a, id_a)] = self.arena.compute_correlation(
-                    handles[i], handles[i])
-                ax_a.resonance_profile[id_a] = self._matrix[(id_a, id_a)]
-                for j in range(i + 1, n):
-                    id_b = ids[j]
-                    ax_b = self.store.axioms[id_b]
-                    corr = flat[k]
-                    k += 1
-                    self._matrix[(id_a, id_b)] = corr
-                    self._matrix[(id_b, id_a)] = corr
-                    ax_a.resonance_profile[id_b] = corr
-                    ax_b.resonance_profile[id_a] = corr
-        else:
-            # Fallback: individual calls (N < 2 or no batch support)
-            for i, id_a in enumerate(ids):
-                ax_a = self.store.axioms[id_a]
-                for id_b in ids[i:]:
-                    ax_b = self.store.axioms[id_b]
-                    corr = self.arena.compute_correlation(ax_a.handle, ax_b.handle)
-                    self._matrix[(id_a, id_b)] = corr
-                    self._matrix[(id_b, id_a)] = corr
-                    ax_a.resonance_profile[id_b] = corr
-                    ax_b.resonance_profile[id_a] = corr
+        # Always go through individual compute_correlation calls
+        # because the dual-axis blend (Phase 8A.3) needs per-pair
+        # access to the behavioural similarity. The per-call cost is
+        # negligible for the corpus sizes typical of synthesis (N <
+        # 200 axioms) and removes the Rust-vs-Python format-divergence
+        # of ``correlate_matrix``.
+        for i, id_a in enumerate(ids):
+            ax_a = self.store.axioms[id_a]
+            for id_b in ids[i:]:
+                ax_b = self.store.axioms[id_b]
+                structural = self.arena.compute_correlation(
+                    ax_a.handle, ax_b.handle
+                )
+                blended = self._blend(structural, ax_a, ax_b)
+                self._matrix[(id_a, id_b)] = blended
+                self._matrix[(id_b, id_a)] = blended
+                ax_a.resonance_profile[id_b] = blended
+                ax_b.resonance_profile[id_a] = blended
 
         return self._matrix
 
@@ -184,7 +215,10 @@ class AxiomaticSynthesizer:
         self.arena = arena
         self.projector = projector
         self.store = AxiomStore(arena)
-        self.resonance = ResonanceMatrix(arena, self.store)
+        # Phase 8A.3: dual-axis resonance is on by default (alpha=0.5)
+        # so the engine resonates on what programs DO, not just what
+        # they look like.
+        self.resonance = ResonanceMatrix(arena, self.store, alpha=0.5)
         self.tau = resonance_threshold
         self._synthesis_log: List[Tuple[List[str], LayeredProjection]] = []
 
@@ -196,6 +230,12 @@ class AxiomaticSynthesizer:
         self._provenance_bridge = provenance_bridge
         self._causal_tracker = causal_tracker
         self._frozen_rng = frozen_rng
+
+        # PLAN.md Phase 8A.2: optional behavioural encoder. Constructed
+        # lazily on first ingest so legacy callers that never want
+        # behavioural axioms pay zero cost. Set ``self.behavioral_encoder``
+        # explicitly (e.g. in tests) to override the default.
+        self.behavioral_encoder: Any = None
 
     # ------------------------------------------------------------------
     # PLAN.md Rule 14 — RNG enforcement probe
@@ -289,15 +329,125 @@ class AxiomaticSynthesizer:
     # ── Ingestion ────────────────────────────────────────────────
 
     def ingest(self, source_id: str, code: str) -> Axiom:
-        """Project a codebase and register it as an axiom."""
+        """Project a codebase and register it as an axiom.
+
+        PLAN.md Phase 8A.2: when a :class:`BehavioralEncoder` is wired
+        in (``self.behavioral_encoder``), every ingested source is
+        also executed against the encoder's probe set so the resulting
+        :class:`Axiom` carries both a structural projection AND a
+        behavioural fingerprint. Encoding failures (timeouts, sandbox
+        crashes) are stored as ``axiom.behavioral = None`` rather
+        than skipping the axiom entirely — the structural side still
+        has value.
+        """
         projection = self.projector.project(code)
-        return self.store.register(source_id, projection)
+        axiom = self.store.register(source_id, projection)
+
+        if self.behavioral_encoder is not None:
+            try:
+                axiom.behavioral = self.behavioral_encoder.encode_behavior(
+                    code
+                )
+            except Exception:  # noqa: BLE001 — failure is recorded as None
+                axiom.behavioral = None
+        return axiom
 
     def ingest_batch(self, corpus: Dict[str, str]) -> int:
         """Ingest multiple codebases. Returns count of axioms registered."""
         for source_id in sorted(corpus.keys()):
             self.ingest(source_id, corpus[source_id])
         return self.store.count()
+
+    # ------------------------------------------------------------------
+    # PLAN.md Phase 8B.2 — goal-directed synthesis
+    # ------------------------------------------------------------------
+
+    def synthesize_for_problem(
+        self,
+        problem_vector: Any,
+        min_clique_size: int = 2,
+        top_k: int = 5,
+    ) -> List[Tuple[List[str], LayeredProjection, float]]:
+        """Rank cliques by goal-relevance and synthesize from the top K.
+
+        ``problem_vector`` is the output of
+        :meth:`bridges.problem_spec.ProblemEncoder.encode_problem` —
+        any object exposing ``handle`` and ``phases`` attributes.
+
+        For every axiom we compute the goal-relevance as the FHRR
+        correlation between the axiom's BEHAVIOURAL phases and the
+        problem's phases. Cliques are then scored as
+        ``mean_resonance × mean_goal_relevance`` and the highest
+        ``top_k`` are synthesised. Returns a list of
+        ``(clique_ids, projection, score)`` tuples sorted descending
+        by score.
+        """
+        # Step 1 — make sure the resonance matrix is current.
+        self.compute_resonance()
+
+        # Step 2 — score each axiom against the problem vector.
+        problem_phases = list(getattr(problem_vector, "phases", []))
+        if not problem_phases:
+            return []
+
+        axiom_relevance: Dict[str, float] = {}
+        for sid, axiom in self.store.axioms.items():
+            relevance = 0.0
+            if axiom.behavioral is not None:
+                a = axiom.behavioral.behavioral_phases
+                if len(a) == len(problem_phases):
+                    relevance = float(
+                        sum(
+                            math.cos(a[i] - problem_phases[i])
+                            for i in range(len(a))
+                        )
+                        / len(a)
+                    )
+            axiom_relevance[sid] = relevance
+
+        # Step 3 — extract cliques and score each one.
+        cliques = self.extract_cliques(min_size=min_clique_size)
+        scored_cliques: List[Tuple[float, List[str]]] = []
+        for clique in cliques:
+            if len(clique) < 2:
+                continue
+            mean_resonance = self._mean_clique_resonance(clique)
+            mean_relevance = sum(
+                axiom_relevance.get(sid, 0.0) for sid in clique
+            ) / len(clique)
+            score = mean_resonance * max(mean_relevance, 0.0)
+            scored_cliques.append((score, clique))
+
+        scored_cliques.sort(key=lambda pair: pair[0], reverse=True)
+
+        # Step 4 — synthesize the top-K and collect projections.
+        results: List[Tuple[List[str], LayeredProjection, float]] = []
+        for score, clique in scored_cliques[: max(1, top_k)]:
+            try:
+                projection = self.synthesize_from_clique(clique)
+            except Exception:  # noqa: BLE001
+                continue
+            results.append((list(clique), projection, score))
+        return results
+
+    def _mean_clique_resonance(self, clique: List[str]) -> float:
+        """Mean pairwise resonance within ``clique`` (uses cached matrix)."""
+        if len(clique) < 2:
+            return 0.0
+        total = 0.0
+        n_pairs = 0
+        for i in range(len(clique)):
+            for j in range(i + 1, len(clique)):
+                key = (clique[i], clique[j])
+                value = self.resonance._matrix.get(key)  # noqa: SLF001
+                if value is None:
+                    value = self.arena.compute_correlation(
+                        self.store.axioms[clique[i]].handle,
+                        self.store.axioms[clique[j]].handle,
+                    )
+                total += float(value)
+                n_pairs += 1
+        return total / max(n_pairs, 1)
 
     # ── Resonance analysis ───────────────────────────────────────
 
