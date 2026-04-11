@@ -6,48 +6,30 @@
     "max_cycles": 3
   },
   "totals": {
-    "solve_rate": 0.4,
-    "partial_rate": 0.4,
-    "solved_count": 2,
-    "partial_count": 2,
+    "solve_rate": 0.6,
+    "partial_rate": 0.6,
+    "solved_count": 3,
+    "partial_count": 3,
     "problem_count": 5,
-    "total_syntheses_attempted": 65,
-    "total_atoms_added": 0,
-    "f_eff_aggregate": 0.0
+    "total_syntheses_attempted": 45,
+    "total_atoms_added": 7,
+    "f_eff_aggregate": 0.15555555555555556
   },
   "problems": [
     {
       "name": "sum_list",
       "solved": true,
       "best_pass_rate": 1.0,
-      "best_source": "def synthesized_fn(x):\n    return sum(x)\n    return y[-0]\n    z = n[0]",
-      "syntheses_attempted": 15,
-      "decoded": 15,
+      "best_source": "def synthesized_fn(x):\n    return sum(x)\n    return max(y)\n    return min(z)",
+      "syntheses_attempted": 5,
+      "decoded": 5,
       "above_fitness": 1,
       "atoms_added": 0,
       "f_eff": 0.0,
-      "elapsed_seconds": 1.5474500940000553,
+      "elapsed_seconds": 1.1216033969999444,
       "cycles": [
         {
           "cycle_index": 0,
-          "syntheses_attempted": 5,
-          "decoded": 5,
-          "above_fitness": 0,
-          "new_atoms": 0,
-          "best_fitness": 0.25,
-          "best_pass_rate": 0.25
-        },
-        {
-          "cycle_index": 1,
-          "syntheses_attempted": 5,
-          "decoded": 5,
-          "above_fitness": 0,
-          "new_atoms": 0,
-          "best_fitness": 0.25,
-          "best_pass_rate": 0.25
-        },
-        {
-          "cycle_index": 2,
           "syntheses_attempted": 5,
           "decoded": 5,
           "above_fitness": 1,
@@ -61,13 +43,77 @@
       "name": "max_element",
       "solved": true,
       "best_pass_rate": 1.0,
-      "best_source": "def synthesized_fn(x):\n    return max(x)\n    return sorted(y)",
+      "best_source": "def synthesized_fn(x):\n    return max(x)\n    return abs(y)\n    z > n\n    return m[-1]\n    k = i[0]",
+      "syntheses_attempted": 5,
+      "decoded": 5,
+      "above_fitness": 1,
+      "atoms_added": 1,
+      "f_eff": 0.2,
+      "elapsed_seconds": 0.9350741190000917,
+      "cycles": [
+        {
+          "cycle_index": 0,
+          "syntheses_attempted": 5,
+          "decoded": 5,
+          "above_fitness": 1,
+          "new_atoms": 1,
+          "best_fitness": 1.0,
+          "best_pass_rate": 1.0
+        }
+      ]
+    },
+    {
+      "name": "reverse_list",
+      "solved": false,
+      "best_pass_rate": 0.45,
+      "best_source": "def synthesized_fn(x):\n    return sorted(x)\n    y.count(1)\n    z + [n]\n    m + 1\n    return k.count(1)\n    i[0]\n    return min(j)\n    min(a)\n    abs(b)\n    c.count",
+      "syntheses_attempted": 15,
+      "decoded": 15,
+      "above_fitness": 2,
+      "atoms_added": 6,
+      "f_eff": 0.4,
+      "elapsed_seconds": 2.639625287999934,
+      "cycles": [
+        {
+          "cycle_index": 0,
+          "syntheses_attempted": 5,
+          "decoded": 5,
+          "above_fitness": 1,
+          "new_atoms": 5,
+          "best_fitness": 0.45,
+          "best_pass_rate": 0.45
+        },
+        {
+          "cycle_index": 1,
+          "syntheses_attempted": 5,
+          "decoded": 5,
+          "above_fitness": 1,
+          "new_atoms": 1,
+          "best_fitness": 0.45,
+          "best_pass_rate": 0.45
+        },
+        {
+          "cycle_index": 2,
+          "syntheses_attempted": 5,
+          "decoded": 5,
+          "above_fitness": 0,
+          "new_atoms": 0,
+          "best_fitness": 0.25,
+          "best_pass_rate": 0.25
+        }
+      ]
+    },
+    {
+      "name": "count_occurrences",
+      "solved": true,
+      "best_pass_rate": 1.0,
+      "best_source": "def synthesized_fn(x):\n    return x.count(1)\n    return min(y)\n    z = [n] + z\n    return max(z)",
       "syntheses_attempted": 5,
       "decoded": 5,
       "above_fitness": 1,
       "atoms_added": 0,
       "f_eff": 0.0,
-      "elapsed_seconds": 0.6497901870000078,
+      "elapsed_seconds": 1.004718124000192,
       "cycles": [
         {
           "cycle_index": 0,
@@ -81,98 +127,16 @@
       ]
     },
     {
-      "name": "reverse_list",
-      "solved": false,
-      "best_pass_rate": 0.45,
-      "best_source": "def synthesized_fn(x):\n    return sorted(x)\n    return min(y)\n    return z",
-      "syntheses_attempted": 15,
-      "decoded": 15,
-      "above_fitness": 1,
-      "atoms_added": 0,
-      "f_eff": 0.0,
-      "elapsed_seconds": 1.5974083879999625,
-      "cycles": [
-        {
-          "cycle_index": 0,
-          "syntheses_attempted": 5,
-          "decoded": 5,
-          "above_fitness": 0,
-          "new_atoms": 0,
-          "best_fitness": 0.25,
-          "best_pass_rate": 0.25
-        },
-        {
-          "cycle_index": 1,
-          "syntheses_attempted": 5,
-          "decoded": 5,
-          "above_fitness": 1,
-          "new_atoms": 0,
-          "best_fitness": 0.45,
-          "best_pass_rate": 0.45
-        },
-        {
-          "cycle_index": 2,
-          "syntheses_attempted": 5,
-          "decoded": 5,
-          "above_fitness": 0,
-          "new_atoms": 0,
-          "best_fitness": 0.0,
-          "best_pass_rate": 0.0
-        }
-      ]
-    },
-    {
-      "name": "count_occurrences",
-      "solved": false,
-      "best_pass_rate": 0.5,
-      "best_source": "def synthesized_fn(x):\n    return sum(x)\n    return max(y)",
-      "syntheses_attempted": 15,
-      "decoded": 15,
-      "above_fitness": 1,
-      "atoms_added": 0,
-      "f_eff": 0.0,
-      "elapsed_seconds": 1.4965513210000836,
-      "cycles": [
-        {
-          "cycle_index": 0,
-          "syntheses_attempted": 5,
-          "decoded": 5,
-          "above_fitness": 0,
-          "new_atoms": 0,
-          "best_fitness": 0.25,
-          "best_pass_rate": 0.25
-        },
-        {
-          "cycle_index": 1,
-          "syntheses_attempted": 5,
-          "decoded": 5,
-          "above_fitness": 0,
-          "new_atoms": 0,
-          "best_fitness": 0.25,
-          "best_pass_rate": 0.25
-        },
-        {
-          "cycle_index": 2,
-          "syntheses_attempted": 5,
-          "decoded": 5,
-          "above_fitness": 1,
-          "new_atoms": 0,
-          "best_fitness": 0.5,
-          "best_pass_rate": 0.5
-        }
-      ]
-    },
-    {
       "name": "flatten_nested",
       "solved": false,
       "best_pass_rate": 0.3,
-      "best_source": "def synthesized_fn(x):\n    return x[0]\n    return sorted(y)\n    z + 0\n    [n]\n    -0\n    m[0]",
+      "best_source": "def synthesized_fn(x):\n    return min(x)\n    return y\n    z = [n] + z\n    return max(z)\n    z > z",
       "syntheses_attempted": 15,
       "decoded": 15,
       "above_fitness": 0,
       "atoms_added": 0,
       "f_eff": 0.0,
-      "elapsed_seconds": 1.3893644089999952,
+      "elapsed_seconds": 2.1506505130000733,
       "cycles": [
         {
           "cycle_index": 0,

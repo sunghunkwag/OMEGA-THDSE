@@ -128,6 +128,7 @@ def _build_synthesizer(
     seed_corpus: Dict[str, str],
     problem_corpus: Dict[str, str],
     use_behavioural: bool,
+    problem_probes: Optional[List[Tuple[str, Any]]] = None,
 ) -> Tuple[Any, Any, Any, Any]:
     """Construct synthesizer + projector + arena + (optional) encoder.
 
@@ -135,6 +136,12 @@ def _build_synthesizer(
     The behavioural encoder is ``None`` in baseline mode (so all
     axioms have ``axiom.behavioral = None`` and the dual-axis
     resonance degrades to a structural-only score scaled by alpha).
+
+    When ``problem_probes`` is supplied (Issue 6), the behavioural
+    encoder is constructed with problem-specific probe inputs drawn
+    from the target problem's io_examples instead of the generic
+    default probes (dicts, None, bools, etc.) that have zero
+    relevance to list-of-ints benchmarks.
     """
     _ensure_z3()
 
@@ -158,9 +165,16 @@ def _build_synthesizer(
         behavioural_arena = _PyFhrrArenaExtended(
             capacity=200_000, dimension=256,
         )
-        behavioural_encoder = BehavioralEncoder(
-            arena=behavioural_arena, dimension=256, n_probes=20,
-        )
+        if problem_probes:
+            behavioural_encoder = BehavioralEncoder(
+                arena=behavioural_arena,
+                dimension=256,
+                probe_inputs=problem_probes,
+            )
+        else:
+            behavioural_encoder = BehavioralEncoder(
+                arena=behavioural_arena, dimension=256, n_probes=20,
+            )
         synthesizer.behavioral_encoder = behavioural_encoder
     else:
         behavioural_encoder = None
@@ -178,6 +192,24 @@ def _build_synthesizer(
             continue
 
     return arena, projector, synthesizer, behavioural_encoder
+
+
+def _problem_specific_probes(
+    spec: "ProblemSpec",
+) -> List[Tuple[str, Any]]:
+    """Build a :class:`BehavioralEncoder` probe set from the first
+    ten io_examples of ``spec``. Each probe is a ``(label, input)``
+    pair; the label is a human-readable index, the input is the raw
+    problem input. Using real io inputs as probes makes the
+    behavioural profile of seed-corpus functions non-trivially
+    correlated with the target oracle's behaviour on the SAME
+    inputs — the generic default probes (dict, None, bool) never
+    match list-of-ints benchmark semantics.
+    """
+    probes: List[Tuple[str, Any]] = []
+    for i, (inp, _expected) in enumerate(spec.io_examples[:10]):
+        probes.append((f"problem_io_{i}", inp))
+    return probes
 
 
 def _decode_clique(
@@ -212,14 +244,27 @@ def run_problem(
 ) -> ProblemResult:
     """Run synthesis for a single problem and return the per-cycle result."""
     t0 = time.monotonic()
+    # Issue 6: when goal-direction is active, feed the behavioural
+    # encoder the actual problem inputs instead of the generic noise
+    # probes. Otherwise fall back to the default probe set so the
+    # baseline configuration stays reproducible.
+    probe_inputs = (
+        _problem_specific_probes(spec) if use_goal_direction else None
+    )
     arena, projector, synthesizer, behavioural_encoder = _build_synthesizer(
         seed_corpus=seed_corpus,
         problem_corpus={},
         use_behavioural=use_behavioural,
+        problem_probes=probe_inputs,
     )
+    # Expose the current problem spec on the synthesizer so
+    # synthesize_for_problem can execute axioms against it as the
+    # direct-io axis (Issue 6).
+    synthesizer._current_problem_spec = spec
 
     from src.decoder.constraint_decoder import ConstraintDecoder
     from src.decoder.subtree_vocab import SubTreeVocabulary
+    from src.decoder.template_decoder import TemplateDecoder, TemplateLibrary
     from src.decoder.vocab_expander import VocabularyExpander
     from src.synthesis.problem_spec import ProblemEncoder
 
@@ -232,10 +277,40 @@ def run_problem(
             continue
     vocab.project_all(arena, projector)
 
+    # Build a template library from the same corpus. Templates give
+    # the decoder compositional skeletons (loops, branches) that the
+    # sub-tree vocabulary alone cannot instantiate.
+    template_lib = TemplateLibrary()
+    for src in seed_corpus.values():
+        try:
+            template_lib.extract_templates(src)
+        except Exception:  # noqa: BLE001
+            continue
+    try:
+        template_lib.project_templates(arena, projector)
+    except Exception:  # noqa: BLE001
+        pass
+
+    template_decoder = TemplateDecoder(
+        arena=arena,
+        projector=projector,
+        subtree_vocab=vocab,
+        template_lib=template_lib,
+        activation_threshold=0.10,
+    )
+
+    # Base activation threshold is a permissive 0.04 — below the 256-dim
+    # noise floor but above the empirical floor of the canonical sub-tree
+    # atoms produced from the seed corpus, so real solvers such as
+    # ``return sum(x0)`` still activate. The decoder's adaptive tightener
+    # escalates the effective threshold in 0.02 steps whenever a probe
+    # returns more than 30 hits (Issue 5), which is how we avoid the
+    # noise-flood regression without starving the solver of real signal.
     decoder = ConstraintDecoder(
         arena, projector, dimension=256,
         activation_threshold=0.04,
         subtree_vocab=vocab,
+        template_decoder=template_decoder,
     )
     expander = VocabularyExpander()
 

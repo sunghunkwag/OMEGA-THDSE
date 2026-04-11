@@ -266,6 +266,68 @@ class VariableThreader:
                     use_key = _make_slot_key(slot.subtree_idx, slot.placeholder)
                     self._uf.union(def_key, use_key)
 
+        # Extend the adjacency heuristic to non-adjacent sub-trees using
+        # classical reaching-definitions analysis. The adjacent pass only
+        # links def-use pairs in consecutive sub-trees; long-range data
+        # flow (e.g. an accumulator defined in sub-tree 0 that is still
+        # being read in sub-tree 4) is handled here.
+        self.unify_reaching_definitions()
+
+    def unify_reaching_definitions(self) -> None:
+        """Propagate reaching definitions across non-adjacent sub-trees.
+
+        For every placeholder P and every sub-tree j that contains a USE
+        of P, walk backwards through sub-trees i = j-1, j-2, ..., 0 and
+        locate the closest sub-tree k that contains a DEF of P. Unify
+        the use-site at j with the definition-site at k. If no such k
+        exists, the use is an input parameter and no union happens here.
+
+        This is the textbook reaching-definitions fixpoint — a def at
+        index k reaches a use at index j iff no intervening index k < m
+        < j also redefines P. Running after ``unify_adjacent`` is safe
+        because adjacent pairs already share a representative, so the
+        re-union is a no-op for them.
+        """
+        if self._subtree_count < 2:
+            return
+
+        for j in range(1, self._subtree_count):
+            use_slots = self._subtree_slots.get(j, [])
+            for use_slot in use_slots:
+                if not use_slot.is_use:
+                    continue
+                # Skip if the same sub-tree also defines it; the within-
+                # sub-tree pass already linked those.
+                same_subtree_defs = [
+                    s for s in use_slots
+                    if s.is_def and s.placeholder == use_slot.placeholder
+                ]
+                if same_subtree_defs:
+                    continue
+
+                # Walk backwards for the closest dominating definition.
+                closest_def: Optional[VarSlot] = None
+                for k in range(j - 1, -1, -1):
+                    prev_slots = self._subtree_slots.get(k, [])
+                    defs_here = [
+                        s for s in prev_slots
+                        if s.is_def and s.placeholder == use_slot.placeholder
+                    ]
+                    if defs_here:
+                        closest_def = defs_here[0]
+                        break
+
+                if closest_def is None:
+                    continue
+
+                def_key = _make_slot_key(
+                    closest_def.subtree_idx, closest_def.placeholder,
+                )
+                use_key = _make_slot_key(
+                    use_slot.subtree_idx, use_slot.placeholder,
+                )
+                self._uf.union(def_key, use_key)
+
     def unify_by_data_deps(
         self,
         data_deps: List[Tuple[int, str, int, str]],

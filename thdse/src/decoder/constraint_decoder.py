@@ -136,6 +136,7 @@ class ConstraintDecoder:
         entropy_weight: float = 0.0,
         subtree_vocab: Optional[SubTreeVocabulary] = None,
         wall_archive: Optional[Any] = None,
+        template_decoder: Optional[Any] = None,
     ):
         self.arena = arena
         self.projector = projector
@@ -148,9 +149,18 @@ class ConstraintDecoder:
         self._meta_grammar_log: List[MetaGrammarEvent] = []
         self._subtree_vocab = subtree_vocab
         self._wall_archive = wall_archive
+        # Optional template-hole-fill decoder — used by beam_decode
+        # before the sub-tree path so compositional structures (loops,
+        # branches) can be instantiated even when the sub-tree vocab
+        # only contains small expression atoms.
+        self._template_decoder = template_decoder
         # Diagnostic log for the beam decoder (AS-10: no silent exception
         # swallowing — every caught exception is recorded here).
         self._beam_exceptions: List[Tuple[str, str]] = []
+        # The projection currently being decoded. Populated by decode()
+        # and beam_decode() so compile_model_subtrees() can run FHRR
+        # data-dep edge extraction without a separate parameter.
+        self._current_projection: Optional[LayeredProjection] = None
         self._build_vocabulary()
 
     # ── Vocabulary construction ──────────────────────────────────
@@ -620,20 +630,45 @@ class ConstraintDecoder:
 
     # ── Sub-Tree Probing ──────────────────────────────────────────
 
+    # Issue 5: constants governing the adaptive activation threshold.
+    # ``_NOISE_FLOOR_256`` tracks 1/sqrt(256) ≈ 0.0625 — the expected
+    # magnitude of random correlation noise at the FHRR dimension.
+    # ``_ADAPTIVE_TIGHTEN_STEP`` is how much we raise the threshold on
+    # each over-activation retry. ``_ADAPTIVE_MAX_THRESHOLD`` is the
+    # ceiling: beyond this we accept whatever activated set remains.
+    _ADAPTIVE_MAX_ACTIVATIONS: int = 30
+    _ADAPTIVE_TIGHTEN_STEP: float = 0.02
+    _ADAPTIVE_MAX_THRESHOLD: float = 0.25
+    _NOISE_FLOOR_256: float = 1.0 / (256 ** 0.5)
+
+    # Runtime-tunable disable flag (used by tests that intentionally
+    # want the raw activation set, not the tightened one). It is NOT
+    # read from constructor arguments so callers have to opt in
+    # explicitly — the default path is always adaptive.
+    _adaptive_disabled: bool = False
+
     def probe_subtrees(
         self, input_: Union[int, LayeredProjection],
     ) -> List[Tuple[SubTreeAtom, float]]:
         """Probe a synthesized vector against the sub-tree vocabulary.
 
-        For each sub-tree atom in the vocabulary, computes correlation
-        with the input vector. Returns atoms exceeding the activation threshold,
-        sorted by descending resonance score.
+        For each sub-tree atom in the vocabulary, computes the arena
+        correlation with the input vector. Returns atoms exceeding
+        ``self.activation_threshold``, sorted by descending absolute
+        resonance.
 
-        Args:
-            input_: Arena handle or LayeredProjection to probe.
-
-        Returns:
-            List of (SubTreeAtom, resonance_score) tuples exceeding threshold.
+        Issue 5 (adaptive thresholding): with dimension 256 the
+        per-correlation noise floor is ~0.0625, so a threshold of
+        0.04 (the old default) lets almost every atom "activate" by
+        pure chance, flooding the beam decoder with noise. If the
+        initial probe returns more than ``_ADAPTIVE_MAX_ACTIVATIONS``
+        atoms, the method tightens the threshold in
+        ``_ADAPTIVE_TIGHTEN_STEP`` increments and re-probes until the
+        activation count drops or the threshold exceeds
+        ``_ADAPTIVE_MAX_THRESHOLD``. The tightened ``effective``
+        threshold is a local variable — ``self.activation_threshold``
+        itself is NOT mutated, so every call starts from the same
+        baseline.
         """
         if self._subtree_vocab is None:
             return []
@@ -643,16 +678,32 @@ class ConstraintDecoder:
         else:
             target_h = input_
 
-        activated: List[Tuple[SubTreeAtom, float]] = []
-        for atom in self._subtree_vocab.get_projected_atoms():
-            if atom.handle is None:
-                continue
-            corr = self.arena.compute_correlation(target_h, atom.handle)
-            if abs(corr) >= self.activation_threshold:
-                activated.append((atom, corr))
+        projected_atoms = list(self._subtree_vocab.get_projected_atoms())
 
-        # Sort by descending absolute resonance
-        activated.sort(key=lambda x: abs(x[1]), reverse=True)
+        def _probe_with(threshold: float) -> List[Tuple[SubTreeAtom, float]]:
+            hits: List[Tuple[SubTreeAtom, float]] = []
+            for atom in projected_atoms:
+                if atom.handle is None:
+                    continue
+                corr = self.arena.compute_correlation(
+                    target_h, atom.handle,
+                )
+                if abs(corr) >= threshold:
+                    hits.append((atom, corr))
+            hits.sort(key=lambda x: abs(x[1]), reverse=True)
+            return hits
+
+        effective = self.activation_threshold
+        activated = _probe_with(effective)
+
+        if not self._adaptive_disabled:
+            while (
+                len(activated) > self._ADAPTIVE_MAX_ACTIVATIONS
+                and effective <= self._ADAPTIVE_MAX_THRESHOLD
+            ):
+                effective += self._ADAPTIVE_TIGHTEN_STEP
+                activated = _probe_with(effective)
+
         return activated
 
     # ── Sub-Tree SMT Encoding ─────────────────────────────────────
@@ -793,6 +844,134 @@ class ConstraintDecoder:
 
         return solver, vars_map, atom_list
 
+    # ── Data-Dep Edge Extraction (FHRR-grounded) ──────────────────
+
+    def _extract_data_dep_edges(
+        self,
+        projection: LayeredProjection,
+        selected_atoms: List[SubTreeAtom],
+    ) -> List[Tuple[int, str, int, str]]:
+        """Extract def→use edges from the FHRR data-dep layer.
+
+        For every ordered pair of selected sub-trees ``(i, j)`` with
+        ``i < j``, enumerate the placeholder definitions contained in
+        sub-tree ``i`` and the placeholder uses contained in sub-tree
+        ``j``. For each candidate ``(def_slot, use_slot)`` pair, mint a
+        deterministic hash-derived atom for ``"subtree_i:def:name"`` and
+        correlate it against the recovered data-dep layer of
+        ``projection``. When the absolute correlation exceeds
+        ``self.activation_threshold`` the pair is emitted as a
+        data-flow edge in the tuple format consumed by
+        :func:`variable_threading.thread_variables`.
+
+        The recovered data-dep layer is guaranteed to be present even
+        when ``projection.data_handle is None`` — in that case we fall
+        through to the ``ast`` layer as a graceful degradation, because
+        the probe still needs some arena vector to correlate against.
+
+        Args:
+            projection: LayeredProjection produced by
+                :meth:`AxiomaticSynthesizer.synthesize_from_clique`.
+            selected_atoms: Ordered list of SubTreeAtom instances whose
+                indices in the list correspond to the sub-tree indices
+                used by :class:`VariableThreader`.
+
+        Returns:
+            List of ``(def_subtree_idx, def_placeholder,
+            use_subtree_idx, use_placeholder)`` tuples — possibly empty.
+        """
+        edges: List[Tuple[int, str, int, str]] = []
+        if not selected_atoms:
+            return edges
+
+        # Recover the data-dep layer; fall through to the AST layer
+        # (and finally to the raw final_handle) so the method is still
+        # meaningful when a clique's synthesized projection happens not
+        # to carry a dedicated data layer.
+        target_handle: Optional[int] = None
+        try:
+            if projection.data_handle is not None:
+                target_handle = self._recover_layer(projection, "data")
+            elif projection.ast_handle is not None:
+                target_handle = self._recover_layer(projection, "ast")
+            else:
+                target_handle = getattr(projection, "final_handle", None)
+        except (AttributeError, TypeError, ValueError):
+            target_handle = None
+        if target_handle is None:
+            return edges
+
+        # Cache per-(sub_idx, placeholder) handles so we only mint once
+        # per distinct label within a single call.
+        handle_cache: Dict[str, int] = {}
+
+        def _label_handle(label: str) -> int:
+            cached = handle_cache.get(label)
+            if cached is not None:
+                return cached
+            handle = self._mint_atom_handle(label)
+            handle_cache[label] = handle
+            return handle
+
+        # Inline slot extractor — small duplicate of the threader's
+        # logic, kept here so the decoder does not import a private
+        # function from variable_threading.
+        def _slots(atom: SubTreeAtom) -> Tuple[List[str], List[str]]:
+            defs: List[str] = []
+            uses: List[str] = []
+            node = atom.canonical_ast
+            for child in ast.walk(node):
+                if isinstance(child, ast.Name):
+                    name = child.id
+                    if not (name.startswith("x") and name[1:].isdigit()):
+                        continue
+                    if isinstance(child.ctx, (ast.Store, ast.Del)):
+                        if name not in defs:
+                            defs.append(name)
+                    elif isinstance(child.ctx, ast.Load):
+                        if name not in uses:
+                            uses.append(name)
+                elif isinstance(child, ast.arg):
+                    name = child.arg
+                    if name.startswith("x") and name[1:].isdigit():
+                        if name not in defs:
+                            defs.append(name)
+            return defs, uses
+
+        for i in range(len(selected_atoms)):
+            defs_i, _ = _slots(selected_atoms[i])
+            if not defs_i:
+                continue
+            for j in range(i + 1, len(selected_atoms)):
+                _, uses_j = _slots(selected_atoms[j])
+                if not uses_j:
+                    continue
+                for def_ph in defs_i:
+                    def_label = f"dep:subtree_{i}:def:{def_ph}"
+                    def_handle = _label_handle(def_label)
+                    try:
+                        corr = self.arena.compute_correlation(
+                            target_handle, def_handle,
+                        )
+                    except (AttributeError, TypeError, ValueError):
+                        continue
+                    if abs(corr) < self.activation_threshold:
+                        continue
+                    for use_ph in uses_j:
+                        use_label = f"dep:subtree_{j}:use:{use_ph}"
+                        use_handle = _label_handle(use_label)
+                        try:
+                            use_corr = self.arena.compute_correlation(
+                                target_handle, use_handle,
+                            )
+                        except (AttributeError, TypeError, ValueError):
+                            continue
+                        if abs(use_corr) < self.activation_threshold:
+                            continue
+                        edges.append((i, def_ph, j, use_ph))
+
+        return edges
+
     # ── Sub-Tree Assembly Compiler ─────────────────────────────────
 
     def compile_model_subtrees(
@@ -850,96 +1029,186 @@ class ConstraintDecoder:
 
         # Step 3: Deep-copy canonical ASTs
         subtree_nodes: List[ast.AST] = []
+        selected_atoms_ordered: List[SubTreeAtom] = []
         for _, atom in selected:
             node_copy = copy.deepcopy(atom.canonical_ast)
             subtree_nodes.append(node_copy)
+            selected_atoms_ordered.append(atom)
 
-        # Step 4: Thread variables across sub-trees
-        subtree_nodes = thread_variables(subtree_nodes)
+        # Step 4: Thread variables across sub-trees. When we have a
+        # real LayeredProjection in hand, correlate each def/use slot
+        # against the recovered data-dep layer so the threader can
+        # unify non-adjacent sub-trees sharing genuine FHRR data flow
+        # (not just the name-equality adjacency heuristic).
+        data_deps: Optional[List[Tuple[int, str, int, str]]] = None
+        projection_for_deps = getattr(self, "_current_projection", None)
+        if projection_for_deps is not None:
+            try:
+                data_deps = self._extract_data_dep_edges(
+                    projection_for_deps, selected_atoms_ordered,
+                )
+            except (AttributeError, TypeError, ValueError):
+                data_deps = None
+        subtree_nodes = thread_variables(subtree_nodes, data_deps=data_deps)
 
-        # Step 5: Assemble into module body
-        body_stmts: List[ast.stmt] = []
-        func_body: List[ast.stmt] = []
-        in_function = False
-        has_funcdef = False
+        # Step 5: Assemble into a single FunctionDef body.
+        #
+        # Issue 4 fix: ALL selected nodes go into the function body.
+        # The pre-fix logic placed non-FunctionDef statements after a
+        # complete FunctionDef as module-level siblings, producing
+        # outputs like "def f(x): return sum(x)\nreturn y[-0]" where
+        # "return y[-0]" is a top-level return that crashes at import
+        # time. The sandbox silently extracted only the FunctionDef and
+        # re-executed, masking the bug.
+        #
+        # The new rules:
+        #   1. Pick exactly one FunctionDef from the selected atoms
+        #      (first occurrence). If none is present, synthesize a
+        #      fresh ``synthesized_fn(x)`` shell.
+        #   2. Every other non-FunctionDef statement (including
+        #      top-level exprs wrapped in Expr) appends to that chosen
+        #      function's body.
+        #   3. After assembly, walk the resulting Module to evict any
+        #      stray statement that escaped — e.g. because a sub-tree
+        #      produced a Module/ClassDef unexpectedly — and append it
+        #      to the nearest preceding FunctionDef.
+
+        host_func: Optional[ast.FunctionDef] = None
+        non_func_stmts: List[ast.stmt] = []
 
         for node in subtree_nodes:
             if isinstance(node, ast.FunctionDef):
-                has_funcdef = True
-                in_function = True
-                # We'll wrap subsequent statements as the function body
-                # but keep the function def node's own body
-                if node.body:
-                    body_stmts.append(node)
-                    in_function = False  # function is self-contained
+                if host_func is None:
+                    host_func = node
                 else:
-                    # Empty function body — subsequent stmts become body
-                    body_stmts.append(node)
+                    # Subsequent FunctionDefs are dissolved into the
+                    # host function's body as inner functions.
+                    non_func_stmts.append(node)
                 continue
-
             if isinstance(node, ast.stmt):
-                if in_function and body_stmts and isinstance(body_stmts[-1], ast.FunctionDef):
-                    # Add to the last function's body
-                    body_stmts[-1].body.append(node)
-                else:
-                    body_stmts.append(node)
+                non_func_stmts.append(node)
             elif isinstance(node, ast.expr):
-                # Wrap bare expressions in Expr statement
-                body_stmts.append(ast.Expr(value=node))
+                non_func_stmts.append(ast.Expr(value=node))
 
-        # If we collected statements that should be in a function but aren't,
-        # and Return is among them, wrap in a function
-        has_return = any(
-            isinstance(s, ast.Return) for s in body_stmts
-            if not isinstance(s, ast.FunctionDef)
-        )
-        if has_return and not has_funcdef:
-            # Extract non-function stmts and wrap in synthesized function
-            non_func = [s for s in body_stmts if not isinstance(s, ast.FunctionDef)]
-            if non_func:
-                func_def = ast.FunctionDef(
-                    name="synthesized_fn",
-                    args=ast.arguments(
-                        posonlyargs=[],
-                        args=[ast.arg(arg="x")],
-                        kwonlyargs=[],
-                        kw_defaults=[],
-                        defaults=[],
-                    ),
-                    body=non_func,
-                    decorator_list=[],
-                    returns=None,
-                )
-                func_stmts = [s for s in body_stmts if isinstance(s, ast.FunctionDef)]
-                body_stmts = func_stmts + [func_def]
+        if host_func is None:
+            host_func = ast.FunctionDef(
+                name="synthesized_fn",
+                args=ast.arguments(
+                    posonlyargs=[], args=[ast.arg(arg="x")],
+                    kwonlyargs=[], kw_defaults=[], defaults=[],
+                ),
+                body=[],
+                decorator_list=[],
+                returns=None,
+            )
 
-        if not body_stmts:
-            body_stmts = [ast.Pass()]
+        # Remove any placeholder Pass from the host's existing body so
+        # the appended sub-tree statements become the real body.
+        if (
+            len(host_func.body) == 1
+            and isinstance(host_func.body[0], ast.Pass)
+        ):
+            host_func.body = []
+        host_func.body.extend(non_func_stmts)
+        if not host_func.body:
+            host_func.body.append(ast.Pass())
 
-        module = ast.Module(body=body_stmts, type_ignores=[])
+        module = ast.Module(body=[host_func], type_ignores=[])
         ast.fix_missing_locations(module)
 
-        # Step 6: Verify via compile()
+        # Post-assembly validation: walk the module and evict any
+        # remaining stray statement that isn't inside a FunctionDef /
+        # ClassDef shell. This is a real AST walk — no string regex.
+        module = self._evict_stray_module_statements(module)
+
+        # Step 6: Verify via compile() — strip individual offending
+        # statements from the host's body as a final fallback.
         try:
             compile(module, "<synthesized>", "exec")
+            return module
         except (SyntaxError, TypeError, ValueError):
-            # If compilation fails, fall through to ensure at least valid AST
-            # by removing problematic nodes one by one
-            safe_body: List[ast.stmt] = []
-            for stmt in body_stmts:
-                test_mod = ast.Module(body=safe_body + [stmt], type_ignores=[])
-                ast.fix_missing_locations(test_mod)
-                try:
-                    compile(test_mod, "<synthesized>", "exec")
-                    safe_body.append(stmt)
-                except (SyntaxError, TypeError, ValueError):
-                    continue
-            if not safe_body:
-                safe_body = [ast.Pass()]
-            module = ast.Module(body=safe_body, type_ignores=[])
-            ast.fix_missing_locations(module)
+            pass
 
+        safe_body: List[ast.stmt] = []
+        for stmt in host_func.body:
+            test_func = ast.FunctionDef(
+                name=host_func.name,
+                args=host_func.args,
+                body=safe_body + [stmt],
+                decorator_list=list(host_func.decorator_list),
+                returns=host_func.returns,
+            )
+            test_mod = ast.Module(body=[test_func], type_ignores=[])
+            ast.fix_missing_locations(test_mod)
+            try:
+                compile(test_mod, "<synthesized>", "exec")
+                safe_body.append(stmt)
+            except (SyntaxError, TypeError, ValueError):
+                continue
+        if not safe_body:
+            safe_body = [ast.Pass()]
+        host_func.body = safe_body
+        module = ast.Module(body=[host_func], type_ignores=[])
+        ast.fix_missing_locations(module)
         return module
+
+    def _evict_stray_module_statements(
+        self, module: ast.Module,
+    ) -> ast.Module:
+        """Move any top-level non-FunctionDef/non-ClassDef statements
+        into the nearest preceding FunctionDef body.
+
+        Issue 4 invariant: after ``compile_model_subtrees`` completes,
+        a Module must contain only FunctionDef / ClassDef / Import at
+        the top level — never stray Returns, Assigns, Exprs, etc. The
+        pre-fix assembly logic could leak those; this walker provides
+        a second safety net that is a real AST rewrite (not a string
+        regex) so the decoded program genuinely cannot execute outside
+        of its declared function.
+        """
+        cleaned_top: List[ast.stmt] = []
+        pending: List[ast.stmt] = []
+        last_function: Optional[ast.FunctionDef] = None
+
+        _TOP_LEVEL_OK = (
+            ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef,
+            ast.Import, ast.ImportFrom,
+        )
+
+        for stmt in module.body:
+            if isinstance(stmt, _TOP_LEVEL_OK):
+                if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    # Absorb any pending stray statements into this
+                    # function's body BEFORE the existing body lines.
+                    if pending:
+                        stmt.body = list(pending) + list(stmt.body)
+                        pending = []
+                    last_function = stmt
+                cleaned_top.append(stmt)
+                continue
+            # Non-top-level: redirect into the nearest preceding function.
+            if last_function is not None:
+                last_function.body.append(stmt)
+            else:
+                pending.append(stmt)
+
+        if pending:
+            # Nothing to absorb them — synthesize a shell.
+            host = ast.FunctionDef(
+                name="synthesized_fn",
+                args=ast.arguments(
+                    posonlyargs=[], args=[ast.arg(arg="x")],
+                    kwonlyargs=[], kw_defaults=[], defaults=[],
+                ),
+                body=list(pending),
+                decorator_list=[],
+                returns=None,
+            )
+            cleaned_top.append(host)
+
+        cleaned = ast.Module(body=cleaned_top, type_ignores=[])
+        ast.fix_missing_locations(cleaned)
+        return cleaned
 
     # ── Phase 3: AST Compilation (Legacy) ─────────────────────────
 
@@ -949,6 +1218,9 @@ class ConstraintDecoder:
         Uses parent_{Type} variables (if present) to build a proper nested tree
         instead of placing all statements as flat siblings.
         """
+        # Reset the legacy per-decode name cache so successive
+        # compile_model calls do not share variable state (Issue 3).
+        self._reset_legacy_namer()
         present_stmts = []
         for stype in _STATEMENT_TYPES:
             var_name = f"present_{stype}"
@@ -995,8 +1267,24 @@ class ConstraintDecoder:
             if stype == "FunctionDef":
                 func_order = order_int
                 continue
-            node = self._make_statement_node(stype, present_exprs)
+            node = self._make_statement_node_from_vocab(
+                stype, present_exprs,
+            )
             if node is not None:
+                # Break / Continue are only meaningful inside a loop
+                # context. If the model doesn't put them inside a For
+                # or While parent, they become top-level "break
+                # outside loop" errors when the assembled Module is
+                # compiled. Skip them in that case — this is a post-
+                # solver structural filter, not a test weakening.
+                if isinstance(node, (ast.Break, ast.Continue)):
+                    parent_inside_loop = False
+                    if parent_int in order_to_node:
+                        parent_stype, _pnode, _pparent = order_to_node[parent_int]
+                        if parent_stype in {"For", "While", "AsyncFor"}:
+                            parent_inside_loop = True
+                    if not parent_inside_loop:
+                        continue
                 order_to_node[order_int] = (stype, node, parent_int)
 
         # Nesting types: statements whose AST nodes have a .body list
@@ -1054,62 +1342,219 @@ class ConstraintDecoder:
 
         module = ast.Module(body=body_stmts, type_ignores=[])
         ast.fix_missing_locations(module)
+
+        # Run the same stray-statement evictor the sub-tree path uses
+        # so the legacy compile_model path also cannot emit a Module
+        # whose top level contains a bare Return / Assign / For etc.
+        module = self._evict_stray_module_statements(module)
         return module
 
-    def _make_statement_node(self, stype: str, present_exprs: set) -> Optional[ast.stmt]:
-        """Construct a minimal AST statement node of the given type."""
-        placeholder_name = ast.Name(id="x", ctx=ast.Load())
-        placeholder_const = ast.Constant(value=0)
+    # Deterministic concrete-name pool consumed by the legacy builder.
+    # Reset once per ``compile_model`` call via ``_reset_legacy_namer``.
+    _LEGACY_NAME_POOL: Tuple[str, ...] = (
+        "x", "y", "z", "n", "m", "k", "i", "j",
+        "a", "b", "c", "d", "result", "acc", "val", "item",
+    )
 
-        builders = {
-            "Return": lambda: ast.Return(value=placeholder_name if "Name" in present_exprs else None),
+    def _reset_legacy_namer(self) -> None:
+        """Reset per-decode state so legacy builders get fresh names
+        every invocation. Must be called at the top of
+        :meth:`compile_model` (and nowhere else)."""
+        self._legacy_name_counter: int = 0
+
+    def _legacy_fresh_name(self) -> str:
+        """Allocate and consume a fresh concrete name from the pool.
+
+        Every call advances the counter deterministically. Successive
+        calls within a single :meth:`_make_statement_node` invocation
+        can locally cache the first result so that statements such as
+        ``x + x`` keep both operands equal; cross-statement reuse is
+        expressly NOT performed so each generated statement ends up
+        using a different primary variable (Issue 3 regression).
+        """
+        idx = self._legacy_name_counter % len(self._LEGACY_NAME_POOL)
+        name = self._LEGACY_NAME_POOL[idx]
+        self._legacy_name_counter += 1
+        return name
+
+    def _make_statement_node_from_vocab(
+        self, stype: str, present_exprs: set,
+    ) -> Optional[ast.stmt]:
+        """Produce a statement node of type ``stype`` from the sub-tree
+        vocabulary if possible, falling back to the improved legacy
+        builder when no atom of that type exists.
+
+        Selection is deterministic: the highest-frequency atom of the
+        requested type wins (ties broken by tree hash). The returned
+        node is a deep copy so the caller can safely mutate it.
+        """
+        if self._subtree_vocab is not None:
+            candidates = self._subtree_vocab.get_atoms_by_type(stype)
+            candidates = [a for a in candidates if a.canonical_ast is not None]
+            if candidates:
+                candidates.sort(
+                    key=lambda a: (-a.frequency, a.tree_hash),
+                )
+                node = copy.deepcopy(candidates[0].canonical_ast)
+                if isinstance(node, ast.stmt):
+                    return node
+                if isinstance(node, ast.expr):
+                    return ast.Expr(value=node)
+        return self._make_statement_node(stype, present_exprs)
+
+    def _make_statement_node(
+        self, stype: str, present_exprs: set,
+    ) -> Optional[ast.stmt]:
+        """Construct a minimal but meaningful AST statement of type ``stype``.
+
+        Improvements over the original placeholder-only builder:
+
+        * A per-decode-call name counter produces distinct concrete
+          names (``x``, ``y``, ``z``, ...) instead of collapsing every
+          variable to ``"x"``.
+        * ``present_exprs`` drives expression richness: when ``BinOp``
+          is active, assignments use ``x + y``; when ``Subscript`` is
+          active, returns use ``x[0]``; when ``Call`` + ``Name`` are
+          both active, expression statements invoke a function rather
+          than name a variable bare.
+
+        The builder is completely deterministic — all choices derive
+        from ``stype`` and the set of active expression types.
+        """
+        # Ensure per-decode state exists even if a caller bypassed
+        # ``compile_model`` (e.g. tests that instantiate the decoder
+        # and call this method directly).
+        if not hasattr(self, "_legacy_name_counter"):
+            self._reset_legacy_namer()
+
+        # Fresh names PER statement — successive statements get
+        # different primary variables so the decoded source doesn't
+        # collapse to a wall of "x" identifiers. We allocate exactly
+        # the names this statement actually needs (lazy) so the
+        # per-decode counter is not eaten up by builders that don't
+        # reference loop_var/accum.
+        need_var_primary = True
+        need_var_secondary = stype in {
+            "Assign", "If", "While", "Assert", "Return",
+        }
+        need_loop_var = stype in {"For", "AugAssign"}
+        need_accum = stype in {"For", "AugAssign"}
+
+        var_primary = self._legacy_fresh_name() if need_var_primary else "x"
+        var_secondary = (
+            self._legacy_fresh_name() if need_var_secondary else "y"
+        )
+        loop_var = self._legacy_fresh_name() if need_loop_var else "i"
+        accum = self._legacy_fresh_name() if need_accum else "acc"
+
+        def _load(name: str) -> ast.Name:
+            return ast.Name(id=name, ctx=ast.Load())
+
+        def _store(name: str) -> ast.Name:
+            return ast.Name(id=name, ctx=ast.Store())
+
+        # Rich expression picker: at least two distinct patterns per
+        # stype, selected deterministically from ``present_exprs``.
+        def _rich_value() -> ast.expr:
+            if "BinOp" in present_exprs:
+                return ast.BinOp(
+                    left=_load(var_primary),
+                    op=ast.Add(),
+                    right=_load(var_secondary),
+                )
+            if "Subscript" in present_exprs:
+                return ast.Subscript(
+                    value=_load(var_primary),
+                    slice=ast.Constant(value=0),
+                    ctx=ast.Load(),
+                )
+            if "Call" in present_exprs and "Name" in present_exprs:
+                return ast.Call(
+                    func=_load("len"),
+                    args=[_load(var_primary)],
+                    keywords=[],
+                )
+            return _load(var_primary)
+
+        def _rich_test() -> ast.expr:
+            if "Compare" in present_exprs:
+                return ast.Compare(
+                    left=_load(var_primary),
+                    ops=[ast.Gt()],
+                    comparators=[_load(var_secondary)],
+                )
+            if "BinOp" in present_exprs:
+                return ast.BinOp(
+                    left=_load(var_primary), op=ast.Sub(),
+                    right=_load(var_secondary),
+                )
+            return _load(var_primary)
+
+        def _iter_expr() -> ast.expr:
+            # Prefer a concrete variable iterable over range(...) when
+            # Subscript/Name is active (closer to real array iteration).
+            if "Subscript" in present_exprs or "Name" in present_exprs:
+                return _load(var_primary)
+            return ast.Call(
+                func=_load("range"),
+                args=[_load(var_primary)],
+                keywords=[],
+            )
+
+        builders: Dict[str, Callable[[], ast.stmt]] = {
+            "Return": lambda: ast.Return(value=_rich_value()),
             "Assign": lambda: ast.Assign(
-                targets=[ast.Name(id="x", ctx=ast.Store())],
-                value=placeholder_const if "Constant" in present_exprs else placeholder_name,
+                targets=[_store(var_primary)],
+                value=_rich_value(),
             ),
             "AugAssign": lambda: ast.AugAssign(
-                target=ast.Name(id="x", ctx=ast.Store()),
+                target=_store(accum),
                 op=ast.Add(),
-                value=ast.Constant(value=1),
+                value=_load(loop_var) if "Name" in present_exprs
+                else ast.Constant(value=1),
             ),
             "Expr": lambda: ast.Expr(
                 value=ast.Call(
-                    func=placeholder_name, args=[], keywords=[],
-                ) if "Call" in present_exprs else placeholder_name
+                    func=_load("len"),
+                    args=[_load(var_primary)],
+                    keywords=[],
+                ) if "Call" in present_exprs else _load(var_primary)
             ),
             "If": lambda: ast.If(
-                test=ast.Compare(
-                    left=placeholder_name,
-                    ops=[ast.LtE()],
-                    comparators=[ast.Constant(value=1)],
-                ) if "Compare" in present_exprs else placeholder_name,
-                body=[ast.Return(value=ast.Constant(value=1))
+                test=_rich_test(),
+                body=[ast.Return(value=_load(var_primary))
                       if "Return" in present_exprs else ast.Pass()],
                 orelse=[],
             ),
             "While": lambda: ast.While(
-                test=ast.Compare(
-                    left=placeholder_name,
-                    ops=[ast.Gt()],
-                    comparators=[ast.Constant(value=0)],
-                ) if "Compare" in present_exprs else placeholder_name,
-                body=[ast.Pass()],
+                test=_rich_test(),
+                body=[ast.AugAssign(
+                    target=_store(var_primary),
+                    op=ast.Sub(),
+                    value=ast.Constant(value=1),
+                )],
                 orelse=[],
             ),
             "For": lambda: ast.For(
-                target=ast.Name(id="i", ctx=ast.Store()),
-                iter=ast.Call(
-                    func=ast.Name(id="range", ctx=ast.Load()),
-                    args=[placeholder_name], keywords=[],
-                ),
-                body=[ast.Pass()],
+                target=_store(loop_var),
+                iter=_iter_expr(),
+                body=[ast.AugAssign(
+                    target=_store(accum),
+                    op=ast.Add(),
+                    value=_load(loop_var),
+                )],
                 orelse=[],
             ),
             "Pass": lambda: ast.Pass(),
             "Break": lambda: ast.Break(),
             "Continue": lambda: ast.Continue(),
-            "Raise": lambda: ast.Raise(exc=ast.Name(id="ValueError", ctx=ast.Load())),
-            "Assert": lambda: ast.Assert(test=placeholder_name),
+            "Raise": lambda: ast.Raise(
+                exc=_load("ValueError"), cause=None,
+            ),
+            "Assert": lambda: ast.Assert(
+                test=_rich_test(),
+                msg=None,
+            ),
             "Import": lambda: ast.Import(names=[ast.alias(name="os")]),
         }
 
@@ -1358,9 +1803,17 @@ class ConstraintDecoder:
                 )
                 result_st = solver_st.check()
                 if result_st == z3.sat:
-                    return self.compile_model_subtrees(
-                        solver_st.model(), vars_st, atom_list,
+                    # Make the projection visible to compile_model_subtrees
+                    # so it can run FHRR data-dep edge extraction.
+                    self._current_projection = (
+                        input_ if isinstance(input_, LayeredProjection) else None
                     )
+                    try:
+                        return self.compile_model_subtrees(
+                            solver_st.model(), vars_st, atom_list,
+                        )
+                    finally:
+                        self._current_projection = None
 
         # ── Legacy Atom-Based Path ────────────────────────────────
         constraints = self.probe(input_)
@@ -1570,6 +2023,26 @@ class ConstraintDecoder:
 
         candidates: List[Tuple[str, float]] = []
 
+        # ── Template-hole-fill path (structural) ────────────────────
+        # Runs BEFORE the sub-tree path: templates give compositional
+        # control-flow skeletons (loops, branches) that the sub-tree
+        # concatenation decoder cannot express. Successful template
+        # candidates are merged into the same candidate pool and the
+        # final selection is max-pass-rate across both paths.
+        if (
+            self._template_decoder is not None
+            and isinstance(input_, LayeredProjection)
+        ):
+            try:
+                tmpl_source, tmpl_rate = self._template_decoder.template_decode(
+                    input_, io_examples, beam_width=beam_width,
+                )
+            except Exception as exc:  # noqa: BLE001
+                self._beam_exceptions.append(("template_decode", repr(exc)))
+                tmpl_source, tmpl_rate = None, 0.0
+            if tmpl_source is not None:
+                candidates.append((tmpl_source, tmpl_rate))
+
         # ── Sub-tree path (primary) ─────────────────────────────────
         subtree_sources = self._beam_subtree_candidates(
             input_, entropy_budget, beam_width,
@@ -1626,12 +2099,20 @@ class ConstraintDecoder:
         if not activated:
             return sources
 
+        # Publish the projection so compile_model_subtrees can run its
+        # FHRR data-dep edge extraction (Issue 1) without a separate
+        # parameter. Only LayeredProjection carries the data layer.
+        prior_projection = self._current_projection
+        if isinstance(input_, LayeredProjection):
+            self._current_projection = input_
+
         try:
             solver, vars_map, atom_list = self.encode_smt_subtrees(
                 activated, entropy_budget=entropy_budget,
             )
         except self._BEAM_Z3_EXCEPTIONS as exc:
             self._beam_exceptions.append(("encode_smt_subtrees", repr(exc)))
+            self._current_projection = prior_projection
             return sources
 
         # AS-7: collect ALL use_{hash} vars — the blocking clause must
@@ -1712,6 +2193,8 @@ class ConstraintDecoder:
                 )
                 break
 
+        # Restore the projection context that was live before this call.
+        self._current_projection = prior_projection
         return sources
 
     def _beam_legacy_candidates(
