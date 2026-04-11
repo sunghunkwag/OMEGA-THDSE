@@ -5,6 +5,8 @@ decode fidelity. All tests require hdc_core — skip gracefully if not available
 """
 
 import ast
+# PLAN.md Phase 6 wiring (Rule 3): no direct hdc_core call
+from src.utils.arena_factory import make_arena as _make_arena_compat
 import os
 import sys
 import pytest
@@ -73,7 +75,7 @@ def find_max(items):
 @pytest.fixture
 def pipeline():
     """Create a fresh arena + projector + synthesizer."""
-    arena = hdc_core.FhrrArena(500_000, 256)
+    arena = _make_arena_compat(500_000, 256)
     projector = IsomorphicProjector(arena, 256)
     synthesizer = AxiomaticSynthesizer(
         arena, projector, resonance_threshold=0.15,

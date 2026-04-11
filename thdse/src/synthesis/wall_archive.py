@@ -42,17 +42,34 @@ class WallRecord:
 class WallArchive:
     """Persistent store of Contradiction Vectors from UNSAT events."""
 
-    def __init__(self, arena: Any, dimension: int):
+    def __init__(
+        self,
+        arena: Any,
+        dimension: int,
+        *,
+        provenance_bridge: Any = None,
+        causal_tracker: Any = None,
+    ):
         """Initialize the wall archive.
 
         Args:
             arena: FhrrArena instance for vector operations.
             dimension: Hypervector dimension.
+            provenance_bridge: Optional :class:`bridges.causal_provenance_bridge.
+                CausalProvenanceBridge`. When wired, every recorded
+                wall emits an ``"unsat"`` event so the wall flows into
+                the bridge counter (Rule 8).
+            causal_tracker: Optional CCE :class:`CausalChainTracker`.
+                When wired, every wall additionally creates a
+                ``record_unsat_event`` entry so the cross-arena causal
+                chain stays complete.
         """
         self.arena = arena
         self.dimension = dimension
         self._walls: List[WallRecord] = []
         self._next_index: int = 0
+        self._provenance_bridge = provenance_bridge
+        self._causal_tracker = causal_tracker
 
     def record(self, unsat_core_result: Any, synthesis_context: str) -> WallRecord:
         """Record a new wall. Extract phases from arena for persistence.
@@ -82,7 +99,40 @@ class WallArchive:
         )
         self._walls.append(wall)
         self._next_index += 1
+
+        # PLAN.md Rule 8 wiring: every wall is an UNSAT outcome — emit
+        # to the provenance bridge so the no-silent-failure counter
+        # stays accurate, and to the causal tracker so the cross-arena
+        # chain remains complete.
+        if self._provenance_bridge is not None:
+            self._provenance_bridge.record_synthesis_event(
+                "unsat",
+                int(v_handle),
+                {
+                    "synthesis_context": synthesis_context,
+                    "core_label_count": len(wall.unsat_core_labels),
+                },
+            )
+        if self._causal_tracker is not None:
+            self._causal_tracker.record_unsat_event(
+                formula_id=f"wall_{wall.timestamp_index}",
+                reason=f"unsat_core:{synthesis_context}",
+                round_idx=int(wall.timestamp_index),
+            )
         return wall
+
+    def query_for_hypothesis_scoring(
+        self, top_k: int = 16
+    ) -> List[List[float]]:
+        """Return the most-recent active wall phase arrays for hypothesis scoring.
+
+        Used by :class:`bridges.memory_hypothesis_bridge.MemoryHypothesisBridge`
+        when scoring a candidate against accumulated contradictions.
+        Returns up to ``top_k`` phase arrays, newest first.
+        """
+        active = [w for w in self._walls if w.status == "active"]
+        active.sort(key=lambda w: w.timestamp_index, reverse=True)
+        return [list(w.v_error_phases) for w in active[:top_k]]
 
     def count(self) -> int:
         """Number of walls recorded (all statuses)."""

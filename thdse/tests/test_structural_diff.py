@@ -5,6 +5,8 @@ All tests require hdc_core — skip gracefully if not available.
 """
 
 import os
+# PLAN.md Phase 6 wiring (Rule 3): no direct hdc_core call
+from src.utils.arena_factory import make_arena as _make_arena_compat
 import sys
 import pytest
 
@@ -20,7 +22,7 @@ from src.analysis.structural_diff import StructuralDiffEngine, LayerSimilarity
 @pytest.fixture
 def pipeline():
     """Create a fresh arena + projector for each test."""
-    arena = hdc_core.FhrrArena(100_000, 256)
+    arena = _make_arena_compat(100_000, 256)
     projector = IsomorphicProjector(arena, 256)
     engine = StructuralDiffEngine(arena, projector)
     return arena, projector, engine

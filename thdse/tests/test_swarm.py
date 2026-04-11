@@ -5,6 +5,8 @@ All tests must complete within 30 seconds total.
 """
 
 import math
+# PLAN.md Phase 6 wiring (Rule 3): no direct hdc_core call
+from src.utils.arena_factory import make_arena as _make_arena_compat
 import os
 import sys
 
@@ -12,7 +14,10 @@ import pytest
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-import hdc_core
+try:
+    import hdc_core  # noqa: F401  # optional Rust backend
+except ImportError:
+    hdc_core = None  # type: ignore[assignment]
 
 from src.swarm.protocol import (
     PhaseMessage, SwarmConfig, serialize_message, deserialize_message,
@@ -148,7 +153,7 @@ def test_wall_broadcast():
 
 def test_consensus_identical():
     """Submit 3 copies of the same phase array, verify clique of size 3."""
-    arena = hdc_core.FhrrArena(100, 64)
+    arena = _make_arena_compat(100, 64)
     phases = [0.3 * (i + 1) for i in range(64)]
     candidate_phases = [phases, phases, phases]
     candidate_metadata = [
@@ -170,7 +175,7 @@ def test_consensus_identical():
 
 def test_consensus_orthogonal():
     """Submit 3 random phase arrays, verify no consensus (below threshold)."""
-    arena = hdc_core.FhrrArena(100, 64)
+    arena = _make_arena_compat(100, 64)
 
     # Generate deterministic but distinct phase arrays using LCG
     def lcg_phases(seed, dim):
@@ -345,7 +350,7 @@ def lcg_phases(seed, dim):
 def test_layered_consensus_cfg_isomorphism():
     """Two candidates with different AST but identical CFG phases
     should form a clique via algorithmic isomorphism rule."""
-    arena = hdc_core.FhrrArena(200, 64)
+    arena = _make_arena_compat(200, 64)
 
     # Generate AST phases that are DIFFERENT
     ast_a = lcg_phases(100, 64)
@@ -383,7 +388,7 @@ def test_layered_consensus_cfg_isomorphism():
 def test_layered_consensus_full_match_still_works():
     """High final-handle correlation still triggers consensus
     even when per-layer phases are not provided."""
-    arena = hdc_core.FhrrArena(200, 64)
+    arena = _make_arena_compat(200, 64)
     phases = [0.5] * 64
 
     result = compute_swarm_consensus(
@@ -467,7 +472,7 @@ def test_weighted_bundle_unit_magnitude():
     weights = [0.9, 0.5, 0.1]
 
     centroid = weighted_bundle_phases(phases, weights)
-    arena = hdc_core.FhrrArena(10, 64)
+    arena = _make_arena_compat(10, 64)
     h = arena.allocate()
     arena.inject_phases(h, centroid)
     self_corr = arena.compute_correlation(h, h)
@@ -478,7 +483,7 @@ def test_weighted_bundle_unit_magnitude():
 
 def test_consensus_reports_adjacency_rules():
     """ConsensusResult.adjacency_rule_counts should report which rules fired."""
-    arena = hdc_core.FhrrArena(200, 64)
+    arena = _make_arena_compat(200, 64)
     phases = [0.5] * 64
 
     result = compute_swarm_consensus(
@@ -501,7 +506,7 @@ def test_consensus_reports_adjacency_rules():
 def test_algo_iso_effective_scoring():
     """An algo_iso clique should score by mean(cfg, data) correlation,
     not by final_corr (which is near-zero for different ASTs)."""
-    arena = hdc_core.FhrrArena(400, 64)
+    arena = _make_arena_compat(400, 64)
 
     # 3 candidates with identical CFG+Data but different AST/final
     cfg_shared = [0.5] * 64

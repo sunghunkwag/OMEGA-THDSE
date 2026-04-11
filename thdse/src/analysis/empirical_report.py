@@ -5,6 +5,8 @@ reproducible validation artifact (JSON + Markdown).
 """
 
 import json
+# PLAN.md Phase 6 wiring (Rule 3): no direct hdc_core call
+from src.utils.arena_factory import make_arena as _make_arena_compat
 import os
 import platform
 import sys
@@ -29,7 +31,10 @@ def generate_empirical_report(
     Returns:
         Dict with full report structure.
     """
-    import hdc_core
+    try:
+        import hdc_core  # noqa: F401  # optional Rust backend
+    except ImportError:
+        hdc_core = None  # type: ignore[assignment]
     from src.projection.isomorphic_projector import IsomorphicProjector
     from src.synthesis.axiomatic_synthesizer import AxiomaticSynthesizer
     from src.decoder.constraint_decoder import ConstraintDecoder
@@ -42,7 +47,7 @@ def generate_empirical_report(
 
     t_start = time.time()
 
-    arena = hdc_core.FhrrArena(arena_capacity, dimension)
+    arena = _make_arena_compat(arena_capacity, dimension)
     projector = IsomorphicProjector(arena, dimension)
     synthesizer = AxiomaticSynthesizer(arena, projector, resonance_threshold=0.15)
 
@@ -70,7 +75,7 @@ def generate_empirical_report(
 
     # Step 2: Compute resonance matrix
     # Use a separate arena for the decoder (the ingestion arena may be near capacity)
-    decoder_arena = hdc_core.FhrrArena(500_000, dimension)
+    decoder_arena = _make_arena_compat(500_000, dimension)
     decoder_projector = IsomorphicProjector(decoder_arena, dimension)
     decoder = ConstraintDecoder(decoder_arena, decoder_projector, dimension, activation_threshold=0.04)
     analyzer = ResonanceAnalyzer(synthesizer, decoder=decoder)
