@@ -283,10 +283,29 @@ def run_problem(
 
         for clique, projection in clique_sources:
             attempted += 1
+            # Beam decode: enumerate multiple Z3 SAT models, pre-score
+            # them against spec.io_examples, and return the best. The
+            # beam decoder is authoritative for candidate selection
+            # (AS-3 — real execution), but we still run
+            # _eval_source_for_problem below for the official scoring
+            # the runner records in the JSON report. If beam_decode
+            # returns None (every candidate scored 0.0), we fall back
+            # to the plain decode_to_source path so partial structural
+            # candidates are still surfaced in the report.
+            source: Optional[str] = None
+            candidate_pass_rate = 0.0
             try:
-                source = decoder.decode_to_source(projection)
+                source, candidate_pass_rate = decoder.beam_decode(
+                    projection, spec.io_examples, beam_width=10,
+                )
             except Exception:  # noqa: BLE001
                 source = None
+                candidate_pass_rate = 0.0
+            if source is None:
+                try:
+                    source = decoder.decode_to_source(projection)
+                except Exception:  # noqa: BLE001
+                    source = None
             if not source or not source.strip():
                 continue
             decoded += 1

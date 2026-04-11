@@ -19,14 +19,14 @@
     {
       "name": "sum_list",
       "solved": false,
-      "best_pass_rate": 0.0,
-      "best_source": "",
+      "best_pass_rate": 0.25,
+      "best_source": "def synthesized_fn(x):\n    return x == 0\n    y = y + z\n    y[-0]\n    n = n + 0\n    []\n    m + [k]\n    [i] + j\n    return a + 0\n    b + c\n    d[::-0]",
       "syntheses_attempted": 24,
       "decoded": 24,
       "above_fitness": 0,
       "atoms_added": 0,
       "f_eff": 0.0,
-      "elapsed_seconds": 1.9369584180001311,
+      "elapsed_seconds": 3.7982157889999826,
       "cycles": [
         {
           "cycle_index": 0,
@@ -43,8 +43,8 @@
           "decoded": 8,
           "above_fitness": 0,
           "new_atoms": 0,
-          "best_fitness": 0.0,
-          "best_pass_rate": 0.0
+          "best_fitness": 0.25,
+          "best_pass_rate": 0.25
         },
         {
           "cycle_index": 2,
@@ -60,14 +60,14 @@
     {
       "name": "max_element",
       "solved": false,
-      "best_pass_rate": 0.0,
-      "best_source": "",
+      "best_pass_rate": 0.05,
+      "best_source": "def synthesized_fn(x):\n    return x == 0\n    y[::-0]\n    z = z + 0\n    z.count(0)",
       "syntheses_attempted": 24,
       "decoded": 24,
       "above_fitness": 0,
       "atoms_added": 0,
       "f_eff": 0.0,
-      "elapsed_seconds": 1.8540208469999016,
+      "elapsed_seconds": 5.2964495639999996,
       "cycles": [
         {
           "cycle_index": 0,
@@ -75,8 +75,8 @@
           "decoded": 8,
           "above_fitness": 0,
           "new_atoms": 0,
-          "best_fitness": 0.0,
-          "best_pass_rate": 0.0
+          "best_fitness": 0.05,
+          "best_pass_rate": 0.05
         },
         {
           "cycle_index": 1,
@@ -84,8 +84,8 @@
           "decoded": 8,
           "above_fitness": 0,
           "new_atoms": 0,
-          "best_fitness": 0.0,
-          "best_pass_rate": 0.0
+          "best_fitness": 0.05,
+          "best_pass_rate": 0.05
         },
         {
           "cycle_index": 2,
@@ -93,22 +93,22 @@
           "decoded": 8,
           "above_fitness": 0,
           "new_atoms": 0,
-          "best_fitness": 0.0,
-          "best_pass_rate": 0.0
+          "best_fitness": 0.05,
+          "best_pass_rate": 0.05
         }
       ]
     },
     {
       "name": "reverse_list",
       "solved": false,
-      "best_pass_rate": 0.0,
-      "best_source": "",
+      "best_pass_rate": 0.25,
+      "best_source": "def synthesized_fn(x):\n    return x\n    y + 0\n    z + n\n    m == 0\n    return k == 0",
       "syntheses_attempted": 24,
       "decoded": 24,
       "above_fitness": 0,
       "atoms_added": 0,
       "f_eff": 0.0,
-      "elapsed_seconds": 1.8245598819999032,
+      "elapsed_seconds": 6.087395984000068,
       "cycles": [
         {
           "cycle_index": 0,
@@ -116,8 +116,8 @@
           "decoded": 8,
           "above_fitness": 0,
           "new_atoms": 0,
-          "best_fitness": 0.0,
-          "best_pass_rate": 0.0
+          "best_fitness": 0.05,
+          "best_pass_rate": 0.05
         },
         {
           "cycle_index": 1,
@@ -125,8 +125,8 @@
           "decoded": 8,
           "above_fitness": 0,
           "new_atoms": 0,
-          "best_fitness": 0.0,
-          "best_pass_rate": 0.0
+          "best_fitness": 0.25,
+          "best_pass_rate": 0.25
         },
         {
           "cycle_index": 2,
@@ -142,17 +142,26 @@
     {
       "name": "count_occurrences",
       "solved": false,
-      "best_pass_rate": 0.2,
-      "best_source": "def synthesized_fn(x):\n    return len(x)\n    y(z)\n    n.count(0)\n    m[::-0]\n    k[0]\n    len(i)\n    return -j\n    return a(b)",
+      "best_pass_rate": 0.25,
+      "best_source": "def synthesized_fn(x):\n    return x == 0\n    y = y + 0\n    z = n\n    z.count(0)",
       "syntheses_attempted": 24,
       "decoded": 24,
       "above_fitness": 0,
       "atoms_added": 0,
       "f_eff": 0.0,
-      "elapsed_seconds": 2.3684092280000186,
+      "elapsed_seconds": 6.284705763000034,
       "cycles": [
         {
           "cycle_index": 0,
+          "syntheses_attempted": 8,
+          "decoded": 8,
+          "above_fitness": 0,
+          "new_atoms": 0,
+          "best_fitness": 0.25,
+          "best_pass_rate": 0.25
+        },
+        {
+          "cycle_index": 1,
           "syntheses_attempted": 8,
           "decoded": 8,
           "above_fitness": 0,
@@ -161,36 +170,27 @@
           "best_pass_rate": 0.2
         },
         {
-          "cycle_index": 1,
-          "syntheses_attempted": 8,
-          "decoded": 8,
-          "above_fitness": 0,
-          "new_atoms": 0,
-          "best_fitness": 0.0,
-          "best_pass_rate": 0.0
-        },
-        {
           "cycle_index": 2,
           "syntheses_attempted": 8,
           "decoded": 8,
           "above_fitness": 0,
           "new_atoms": 0,
-          "best_fitness": 0.0,
-          "best_pass_rate": 0.0
+          "best_fitness": 0.25,
+          "best_pass_rate": 0.25
         }
       ]
     },
     {
       "name": "flatten_nested",
       "solved": false,
-      "best_pass_rate": 0.0,
-      "best_source": "",
+      "best_pass_rate": 0.3,
+      "best_source": "def synthesized_fn(x):\n    return x[-0]\n    n = []\n    return n == 0\n    m(k)\n    sorted(i)\n    j = a[0]\n    j + [b]\n    -0\n    c + 0\n    [d]\n    y == 0\n    len(z)",
       "syntheses_attempted": 24,
       "decoded": 24,
       "above_fitness": 0,
       "atoms_added": 0,
       "f_eff": 0.0,
-      "elapsed_seconds": 1.8883301639998535,
+      "elapsed_seconds": 5.916785104999917,
       "cycles": [
         {
           "cycle_index": 0,
@@ -198,8 +198,8 @@
           "decoded": 8,
           "above_fitness": 0,
           "new_atoms": 0,
-          "best_fitness": 0.0,
-          "best_pass_rate": 0.0
+          "best_fitness": 0.05,
+          "best_pass_rate": 0.05
         },
         {
           "cycle_index": 1,
@@ -207,8 +207,8 @@
           "decoded": 8,
           "above_fitness": 0,
           "new_atoms": 0,
-          "best_fitness": 0.0,
-          "best_pass_rate": 0.0
+          "best_fitness": 0.3,
+          "best_pass_rate": 0.3
         },
         {
           "cycle_index": 2,
