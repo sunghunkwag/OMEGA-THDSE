@@ -50,6 +50,10 @@ class Axiom:
     # behavioral similarity.
     behavioral: Optional[Any] = None
     resonance_profile: Dict[str, float] = field(default_factory=dict)
+    # Issue 6: keep the ingested source string so
+    # ``synthesize_for_problem`` can exec() the axiom against the
+    # target problem's io_examples as a third ranking axis.
+    source_code: Optional[str] = None
 
     @property
     def handle(self) -> int:
@@ -342,6 +346,9 @@ class AxiomaticSynthesizer:
         """
         projection = self.projector.project(code)
         axiom = self.store.register(source_id, projection)
+        # Issue 6: retain the source so goal-directed synthesis can
+        # run the axiom against the target problem's io_examples.
+        axiom.source_code = code
 
         if self.behavioral_encoder is not None:
             try:
@@ -417,18 +424,63 @@ class AxiomaticSynthesizer:
                     )
             axiom_relevance[sid] = relevance
 
-        # Step 3 — extract cliques and score each one with an ADDITIVE
-        # blend. Additive (not multiplicative) is essential here: when
-        # behavioural similarity is ~0 for most axioms — typical when
-        # the seed corpus does not share io-profiles with the problem —
-        # the old multiplicative formula drove every score to 0 and the
-        # top_k selection became arbitrary. Additive keeps the
-        # structural ranking meaningful even when relevance collapses
-        # and still boosts cliques that happen to be behaviourally
-        # relevant as well.
+        # Issue 6: direct-io scoring axis. When the caller has set
+        # ``self._current_problem_spec`` (the runner does this in
+        # ``run_problem``), exec() each axiom's stored source against
+        # the spec.io_examples via the authoritative
+        # ``score_against_problem`` scorer. The resulting per-axiom
+        # pass_rate becomes a third ranking axis alongside the
+        # structural and behavioural similarities. This is the real
+        # anti-noise signal: a function that actually solves the
+        # problem scores 1.0 even if its FHRR similarity to the
+        # problem vector is near zero.
+        spec = getattr(self, "_current_problem_spec", None)
+        direct_io: Dict[str, float] = {}
+        if spec is not None:
+            try:
+                from src.synthesis.problem_spec import (  # noqa: WPS433
+                    score_against_problem,
+                )
+            except ImportError:
+                score_against_problem = None  # type: ignore[assignment]
+            if score_against_problem is not None:
+                for sid, axiom in self.store.axioms.items():
+                    source = axiom.source_code
+                    if not source:
+                        continue
+                    try:
+                        ns: Dict[str, Any] = {}
+                        exec(source, ns)  # noqa: S102
+                    except Exception:  # noqa: BLE001
+                        continue
+                    candidate = None
+                    for value in ns.values():
+                        if callable(value) and not isinstance(value, type):
+                            candidate = value
+                            break
+                    if candidate is None:
+                        continue
+                    try:
+                        score = score_against_problem(candidate, spec)
+                    except Exception:  # noqa: BLE001
+                        continue
+                    direct_io[sid] = float(score.get("pass_rate", 0.0))
+
+        # Step 3 — extract cliques and score each one with a THREE-
+        # axis blend:
+        #
+        #   score = 0.3·mean_resonance + 0.3·max(mean_relevance, 0)
+        #           + 0.4·mean_direct_io
+        #
+        # When ``direct_io`` is empty (the baseline configuration)
+        # the formula degrades to the previous additive blend with
+        # ``alpha = self.resonance.alpha``. The direct_io axis is the
+        # only one that reliably distinguishes cliques containing the
+        # actual solution from cliques that merely look similar.
         alpha = float(getattr(self.resonance, "alpha", 0.5))
         cliques = self.extract_cliques(min_size=min_clique_size)
         scored_cliques: List[Tuple[float, List[str]]] = []
+        use_direct_io = bool(direct_io)
         for clique in cliques:
             if len(clique) < 2:
                 continue
@@ -436,10 +488,20 @@ class AxiomaticSynthesizer:
             mean_relevance = sum(
                 axiom_relevance.get(sid, 0.0) for sid in clique
             ) / len(clique)
-            score = (
-                alpha * mean_resonance
-                + (1.0 - alpha) * max(mean_relevance, 0.0)
-            )
+            if use_direct_io:
+                mean_direct = sum(
+                    direct_io.get(sid, 0.0) for sid in clique
+                ) / len(clique)
+                score = (
+                    0.3 * mean_resonance
+                    + 0.3 * max(mean_relevance, 0.0)
+                    + 0.4 * mean_direct
+                )
+            else:
+                score = (
+                    alpha * mean_resonance
+                    + (1.0 - alpha) * max(mean_relevance, 0.0)
+                )
             scored_cliques.append((score, clique))
 
         scored_cliques.sort(key=lambda pair: pair[0], reverse=True)

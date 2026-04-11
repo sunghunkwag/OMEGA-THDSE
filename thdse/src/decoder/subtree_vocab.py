@@ -57,10 +57,21 @@ class _NameCanonicalizer(ast.NodeTransformer):
     first variable encountered gets x0, second gets x1, etc.
     """
 
-    # Type marker constants used as canonical literal values
+    # Type marker constants used as canonical literal values.
+    #
+    # IMPORTANT: integer and float constants are intentionally OMITTED
+    # from this mapping so they survive canonicalisation verbatim. The
+    # pre-fix behaviour collapsed ``arr[::-1]`` into ``arr[::-0]`` —
+    # which is a runtime error on slice step 0 — and turned
+    # ``arr.count(1)`` into ``arr.count(0)``, counting zeros instead
+    # of ones. Both bugs eliminated entire families of canonical atoms
+    # from the vocabulary without producing any generalisation benefit
+    # (literal values in algorithmic library functions carry essential
+    # semantics — ``-1`` for slice step, ``0``/``1`` for accumulator
+    # seeds, etc.). Preserving int/float is domain-agnostic: it widens
+    # the vocabulary equally for every problem, not just any specific
+    # benchmark.
     _TYPE_MARKERS = {
-        int: 0,       # INT marker
-        float: 0.0,   # FLOAT marker
         str: "",      # STR marker
         bool: True,   # BOOL marker
         type(None): None,  # NONE marker
@@ -186,22 +197,31 @@ def _extract_subtrees(
 ) -> List[ast.AST]:
     """Extract all sub-trees of depth between min_depth and max_depth.
 
-    Walks the AST and collects nodes whose sub-tree depth falls within range.
-    Only collects statement and expression nodes (not auxiliary nodes like
-    arguments, keywords, etc.).
+    Walks the AST and collects nodes whose sub-tree depth falls within
+    range. Only collects statement and expression nodes (not auxiliary
+    nodes like arguments, keywords, etc.).
+
+    Return and Assign statements receive a ``+1`` depth bonus — i.e.
+    they may extend one level beyond ``max_depth`` — so that common
+    library helpers such as ``return arr[::-1]`` (depth 5 once integer
+    literals are preserved verbatim) and ``total = total + x`` are
+    still captured in the vocabulary. Every other statement/expression
+    class remains at the stricter ``max_depth`` ceiling so the
+    vocabulary does not flood with deep random fragments.
 
     Args:
         tree: Root AST node to walk.
         min_depth: Minimum sub-tree depth (inclusive).
-        max_depth: Maximum sub-tree depth (inclusive).
+        max_depth: Generic maximum sub-tree depth (inclusive). The
+            Return/Assign bonus lets those types extend one level.
 
     Returns:
-        List of AST nodes whose depth is in [min_depth, max_depth].
+        List of AST nodes whose depth is in [min_depth, max_depth]
+        (or [min_depth, max_depth + 1] for Return/Assign).
     """
     results: List[ast.AST] = []
-
-    # Types worth extracting as sub-trees
     _EXTRACTABLE = (ast.stmt, ast.expr)
+    _DEPTH_BONUS_TYPES = (ast.Return, ast.Assign, ast.AugAssign)
 
     for node in ast.walk(tree):
         if not isinstance(node, _EXTRACTABLE):
@@ -210,7 +230,10 @@ def _extract_subtrees(
         if isinstance(node, (ast.Name, ast.Constant)):
             continue
         depth = _compute_depth(node)
-        if min_depth <= depth <= max_depth:
+        effective_max = max_depth + (
+            1 if isinstance(node, _DEPTH_BONUS_TYPES) else 0
+        )
+        if min_depth <= depth <= effective_max:
             results.append(node)
 
     return results
@@ -283,7 +306,12 @@ class SubTreeVocabulary:
 
         Args:
             min_depth: Minimum sub-tree depth to extract.
-            max_depth: Maximum sub-tree depth to extract.
+            max_depth: Maximum sub-tree depth for generic sub-trees.
+                Return statements and Assign statements receive a +1
+                bonus in :func:`_extract_subtrees` so common library
+                helpers like ``return arr[::-1]`` still land in the
+                vocabulary without flooding it with deeper random
+                fragments. See the helper for the full rationale.
         """
         self.min_depth = min_depth
         self.max_depth = max_depth
