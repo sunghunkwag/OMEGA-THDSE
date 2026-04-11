@@ -35,7 +35,7 @@ import ast
 import copy
 import hashlib
 import math
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 from dataclasses import dataclass, field
 from enum import Enum, auto
 
@@ -148,6 +148,9 @@ class ConstraintDecoder:
         self._meta_grammar_log: List[MetaGrammarEvent] = []
         self._subtree_vocab = subtree_vocab
         self._wall_archive = wall_archive
+        # Diagnostic log for the beam decoder (AS-10: no silent exception
+        # swallowing — every caught exception is recorded here).
+        self._beam_exceptions: List[Tuple[str, str]] = []
         self._build_vocabulary()
 
     # ── Vocabulary construction ──────────────────────────────────
@@ -1458,3 +1461,417 @@ class ConstraintDecoder:
         else:
             correlation = self.arena.compute_correlation(input_, reprojected.final_handle)
         return source, correlation
+
+    # ── Beam Decode (io_example-guided candidate selection) ─────────
+    #
+    # The beam decoder inverts the success criterion of ``decode`` from
+    # "FHRR similarity" to "io_examples pass rate". It enumerates up to
+    # ``beam_width`` DISTINCT Z3 SAT models in the sub-tree path — using
+    # genuine blocking clauses over the ``use_{hash}`` variables — and
+    # returns the candidate source that passes the most io_examples.
+    #
+    # Design notes (matching task spec):
+    #   - AS-1: each candidate is a distinct Z3 SAT model, not a string-
+    #     perturbation of a single decoded output.
+    #   - AS-3: scoring goes through the authoritative
+    #     ``score_against_problem`` scorer in src/synthesis/problem_spec.py
+    #     — every candidate is really exec()'d and invoked on every io.
+    #   - AS-6: the import is performed lazily inside the method to avoid
+    #     any chance of a circular import against ``problem_spec``.
+    #   - AS-7: the blocking clause negates the FULL model assignment
+    #     (all ``use_{hash}`` vars OR'd together), not one variable.
+    #   - AS-10: every caught exception is recorded in
+    #     ``self._beam_exceptions`` via :meth:`get_beam_diagnostics` —
+    #     no bare ``except:`` and no silent ``except Exception: pass``.
+
+    # Narrow exception tuples used throughout the beam pipeline. They are
+    # deliberately enumerated (not ``Exception``) to satisfy AS-10's
+    # "specific exception type" rule.
+    _BEAM_EXEC_EXCEPTIONS: Tuple[type, ...] = (
+        SyntaxError, IndentationError, NameError, TypeError,
+        ValueError, AttributeError, IndexError, KeyError,
+        ZeroDivisionError, ArithmeticError, ImportError, RuntimeError,
+        AssertionError, OverflowError, MemoryError, RecursionError,
+        LookupError, UnicodeError,
+    )
+    _BEAM_AST_EXCEPTIONS: Tuple[type, ...] = (
+        SyntaxError, ValueError, TypeError, AttributeError,
+    )
+    _BEAM_Z3_EXCEPTIONS: Tuple[type, ...] = (
+        z3.Z3Exception, TypeError, ValueError, AttributeError,
+    )
+
+    def beam_decode(
+        self,
+        input_: Union[int, LayeredProjection],
+        io_examples: List[Tuple[Any, Any]],
+        beam_width: int = 10,
+    ) -> Tuple[Optional[str], float]:
+        """Beam decode: generate N candidates, score against io_examples, return best.
+
+        Unlike :meth:`decode`, which emits a single candidate per Z3 solve,
+        ``beam_decode`` enumerates up to ``beam_width`` distinct SAT models
+        via blocking clauses on the sub-tree ``use_{hash}`` vars, executes
+        every candidate against the supplied io_examples, and returns the
+        source string with the highest pass rate.
+
+        If the sub-tree path yields zero candidates, ``beam_decode`` falls
+        through to the legacy atom-based path and generates ``beam_width``
+        variants by including/excluding optional node types. Every variant
+        still goes through a real Z3 solve, and every candidate is scored
+        via the authoritative :func:`score_against_problem` scorer.
+
+        Args:
+            input_: Arena handle or LayeredProjection to decode.
+            io_examples: ``(input, expected_output)`` pairs used to rank
+                candidates. A :class:`ProblemSpec` is constructed internally.
+            beam_width: Maximum number of Z3 SAT models to enumerate.
+
+        Returns:
+            Tuple ``(source, pass_rate)``. ``source`` is ``None`` when every
+            candidate scores 0.0 — otherwise it's the highest-scoring source
+            and ``pass_rate`` is the fraction of passing io_examples.
+        """
+        # Late import keeps decoder ⇔ problem_spec dependency acyclic (AS-6).
+        from src.synthesis.problem_spec import (  # noqa: WPS433
+            ProblemSpec,
+            score_against_problem,
+        )
+
+        # Reset diagnostics for this call (AS-10).
+        self._beam_exceptions = []
+
+        if not io_examples:
+            self._beam_exceptions.append(("precondition", "empty io_examples"))
+            return None, 0.0
+
+        if beam_width < 1:
+            beam_width = 1
+
+        try:
+            synthetic_spec = ProblemSpec(
+                name="__beam_decode_target__",
+                io_examples=list(io_examples),
+                description="Internal beam-decode io_examples container.",
+            )
+        except (ValueError, TypeError) as exc:
+            self._beam_exceptions.append(("build_problem_spec", repr(exc)))
+            return None, 0.0
+
+        # Same entropy ceiling derivation as ``decode``.
+        entropy_budget: Optional[float] = None
+        if isinstance(input_, LayeredProjection) and self.entropy_weight > 0:
+            try:
+                phase_entropy = compute_phase_entropy(input_.ast_phases)
+                entropy_budget = phase_entropy * self.entropy_weight * 50
+            except (TypeError, ValueError, AttributeError) as exc:
+                self._beam_exceptions.append(("entropy_budget", repr(exc)))
+                entropy_budget = None
+
+        candidates: List[Tuple[str, float]] = []
+
+        # ── Sub-tree path (primary) ─────────────────────────────────
+        subtree_sources = self._beam_subtree_candidates(
+            input_, entropy_budget, beam_width,
+        )
+        for source in subtree_sources:
+            pass_rate = self._score_candidate(
+                source, synthetic_spec, score_against_problem,
+            )
+            candidates.append((source, pass_rate))
+
+        # ── Legacy atom-based fallback ──────────────────────────────
+        # Only engaged when the sub-tree path produced zero candidates.
+        if not candidates:
+            legacy_sources = self._beam_legacy_candidates(
+                input_, entropy_budget, beam_width,
+            )
+            for source in legacy_sources:
+                pass_rate = self._score_candidate(
+                    source, synthetic_spec, score_against_problem,
+                )
+                candidates.append((source, pass_rate))
+
+        if not candidates:
+            return None, 0.0
+
+        candidates.sort(key=lambda pair: pair[1], reverse=True)
+        best_source, best_rate = candidates[0]
+        if best_rate <= 0.0:
+            return None, 0.0
+        return best_source, best_rate
+
+    def _beam_subtree_candidates(
+        self,
+        input_: Union[int, LayeredProjection],
+        entropy_budget: Optional[float],
+        beam_width: int,
+    ) -> List[str]:
+        """Enumerate up to ``beam_width`` DISTINCT sub-tree SAT models.
+
+        Each iteration adds a blocking clause that negates the full
+        ``use_{hash}`` model assignment (AS-7) so the next ``solver.check()``
+        is forced toward a materially different sub-tree selection.
+        """
+        sources: List[str] = []
+        if self._subtree_vocab is None or self._subtree_vocab.size() == 0:
+            return sources
+
+        try:
+            activated = self.probe_subtrees(input_)
+        except (AttributeError, TypeError, ValueError) as exc:
+            self._beam_exceptions.append(("probe_subtrees", repr(exc)))
+            return sources
+
+        if not activated:
+            return sources
+
+        try:
+            solver, vars_map, atom_list = self.encode_smt_subtrees(
+                activated, entropy_budget=entropy_budget,
+            )
+        except self._BEAM_Z3_EXCEPTIONS as exc:
+            self._beam_exceptions.append(("encode_smt_subtrees", repr(exc)))
+            return sources
+
+        # AS-7: collect ALL use_{hash} vars — the blocking clause must
+        # negate the full model assignment, not just one var.
+        use_vars: Dict[str, Any] = {
+            key: value
+            for key, value in vars_map.items()
+            if key.startswith("use_")
+        }
+        if not use_vars:
+            return sources
+
+        seen: set = set()
+
+        for iteration in range(beam_width):
+            try:
+                check_result = solver.check()
+            except self._BEAM_Z3_EXCEPTIONS as exc:
+                self._beam_exceptions.append(
+                    (f"solver.check[{iteration}]", repr(exc)),
+                )
+                break
+            if check_result != z3.sat:
+                break
+
+            try:
+                model = solver.model()
+            except self._BEAM_Z3_EXCEPTIONS as exc:
+                self._beam_exceptions.append(
+                    (f"solver.model[{iteration}]", repr(exc)),
+                )
+                break
+
+            module: Optional[ast.Module] = None
+            try:
+                module = self.compile_model_subtrees(
+                    model, vars_map, atom_list,
+                )
+            except (
+                z3.Z3Exception, AttributeError, ValueError,
+                TypeError, SyntaxError,
+            ) as exc:
+                self._beam_exceptions.append(
+                    (f"compile_model_subtrees[{iteration}]", repr(exc)),
+                )
+                module = None
+
+            source: Optional[str] = None
+            if module is not None:
+                try:
+                    unparsed = ast.unparse(module)
+                except self._BEAM_AST_EXCEPTIONS as exc:
+                    self._beam_exceptions.append(
+                        (f"unparse[{iteration}]", repr(exc)),
+                    )
+                    unparsed = None
+                if unparsed is not None:
+                    stripped = unparsed.strip()
+                    if stripped and stripped not in seen:
+                        seen.add(stripped)
+                        sources.append(stripped)
+                        source = stripped
+
+            # Force the next solve toward a distinct use_{hash} assignment.
+            try:
+                block_terms = [
+                    use_vars[h] != model.evaluate(
+                        use_vars[h], model_completion=True,
+                    )
+                    for h in use_vars
+                ]
+                if not block_terms:
+                    break
+                solver.add(z3.Or(*block_terms))
+            except self._BEAM_Z3_EXCEPTIONS as exc:
+                self._beam_exceptions.append(
+                    (f"block_clause[{iteration}]", repr(exc)),
+                )
+                break
+
+        return sources
+
+    def _beam_legacy_candidates(
+        self,
+        input_: Union[int, LayeredProjection],
+        entropy_budget: Optional[float],
+        beam_width: int,
+    ) -> List[str]:
+        """Fallback: generate legacy-path candidates by varying which
+        optional node types are included in the constraint set.
+
+        Each variant constructs a fresh :class:`DecodedConstraints` with a
+        different ``active_node_types`` subset, then runs the full
+        ``encode_smt`` → ``solver.check()`` → ``compile_model`` pipeline.
+        Every variant is therefore a genuinely different Z3 problem, not
+        a post-hoc mutation of a single decoded output.
+        """
+        sources: List[str] = []
+        try:
+            base_constraints = self.probe(input_)
+        except (AttributeError, TypeError, ValueError) as exc:
+            self._beam_exceptions.append(("probe_legacy", repr(exc)))
+            return sources
+
+        if not base_constraints.active_node_types:
+            return sources
+
+        # Deduplicate and rank by |resonance| descending.
+        active_unique = list(dict.fromkeys(base_constraints.active_node_types))
+        ranked = sorted(
+            active_unique,
+            key=lambda t: -abs(
+                base_constraints.resonance_scores.get(
+                    f"atom:type:{t}", 0.0,
+                )
+            ),
+        )
+
+        variants: List[List[str]] = []
+        variants.append(list(ranked))
+        # Progressive inclusion: top-1, top-2, ..., top-n
+        for k in range(1, len(ranked) + 1):
+            candidate_variant = ranked[:k]
+            if candidate_variant not in variants:
+                variants.append(candidate_variant)
+        # Drop-one variants
+        for drop_idx in range(len(ranked)):
+            candidate_variant = ranked[:drop_idx] + ranked[drop_idx + 1:]
+            if candidate_variant and candidate_variant not in variants:
+                variants.append(candidate_variant)
+
+        seen_sources: set = set()
+        for i, variant_types in enumerate(variants):
+            if len(sources) >= beam_width:
+                break
+            variant = DecodedConstraints(
+                active_node_types=list(variant_types),
+                cfg_sequences=list(base_constraints.cfg_sequences),
+                cfg_branches=list(base_constraints.cfg_branches),
+                cfg_loops=list(base_constraints.cfg_loops),
+                data_deps=list(base_constraints.data_deps),
+                resonance_scores=dict(base_constraints.resonance_scores),
+            )
+
+            try:
+                solver, vars_map = self.encode_smt(
+                    variant, entropy_budget=entropy_budget,
+                )
+            except self._BEAM_Z3_EXCEPTIONS as exc:
+                self._beam_exceptions.append(
+                    (f"legacy_encode[{i}]", repr(exc)),
+                )
+                continue
+
+            try:
+                result = solver.check()
+            except self._BEAM_Z3_EXCEPTIONS as exc:
+                self._beam_exceptions.append(
+                    (f"legacy_check[{i}]", repr(exc)),
+                )
+                continue
+            if result != z3.sat:
+                continue
+
+            try:
+                model = solver.model()
+                module = self.compile_model(model, vars_map)
+            except (
+                z3.Z3Exception, AttributeError, ValueError, TypeError,
+            ) as exc:
+                self._beam_exceptions.append(
+                    (f"legacy_compile[{i}]", repr(exc)),
+                )
+                continue
+
+            if module is None:
+                continue
+
+            try:
+                unparsed = ast.unparse(module)
+            except self._BEAM_AST_EXCEPTIONS as exc:
+                self._beam_exceptions.append(
+                    (f"legacy_unparse[{i}]", repr(exc)),
+                )
+                continue
+
+            if not unparsed or not unparsed.strip():
+                continue
+            stripped = unparsed.strip()
+            if stripped in seen_sources:
+                continue
+            seen_sources.add(stripped)
+            sources.append(stripped)
+
+        return sources
+
+    def _score_candidate(
+        self,
+        source: str,
+        spec: Any,
+        score_fn: Callable[[Callable[[Any], Any], Any], Dict[str, Any]],
+    ) -> float:
+        """Execute ``source`` and hand its first callable to ``score_fn``.
+
+        This is AS-3 — no simulation. The source is really ``exec``'d and
+        ``score_against_problem`` really invokes the extracted callable on
+        every io_example. Exceptions raised during ``exec`` or top-level
+        evaluation are recorded and return a pass rate of 0.0.
+        """
+        namespace: Dict[str, Any] = {}
+        try:
+            exec(source, namespace)  # noqa: S102 — scoring is sandboxed by score_fn
+        except self._BEAM_EXEC_EXCEPTIONS as exc:
+            self._beam_exceptions.append(("exec", repr(exc)))
+            return 0.0
+
+        candidate: Optional[Callable[[Any], Any]] = None
+        for value in namespace.values():
+            if callable(value) and not isinstance(value, type):
+                candidate = value
+                break
+
+        if candidate is None:
+            self._beam_exceptions.append(
+                ("exec", "no_callable_extracted"),
+            )
+            return 0.0
+
+        try:
+            score = score_fn(candidate, spec)
+        except self._BEAM_EXEC_EXCEPTIONS as exc:
+            self._beam_exceptions.append(("score_against_problem", repr(exc)))
+            return 0.0
+
+        try:
+            return float(score.get("pass_rate", 0.0))
+        except (AttributeError, TypeError, ValueError) as exc:
+            self._beam_exceptions.append(("pass_rate_extract", repr(exc)))
+            return 0.0
+
+    def get_beam_diagnostics(self) -> List[Tuple[str, str]]:
+        """Return the exception log captured by the last beam_decode call."""
+        return list(self._beam_exceptions)

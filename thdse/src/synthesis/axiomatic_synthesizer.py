@@ -376,11 +376,23 @@ class AxiomaticSynthesizer:
 
         For every axiom we compute the goal-relevance as the FHRR
         correlation between the axiom's BEHAVIOURAL phases and the
-        problem's phases. Cliques are then scored as
-        ``mean_resonance × mean_goal_relevance`` and the highest
-        ``top_k`` are synthesised. Returns a list of
-        ``(clique_ids, projection, score)`` tuples sorted descending
-        by score.
+        problem's phases. Cliques are then scored as an ADDITIVE blend
+        of mean structural resonance and mean behavioural relevance:
+
+            score = α · mean_resonance + (1 − α) · max(mean_relevance, 0)
+
+        where ``α = self.resonance.alpha`` (default 0.5). This replaces
+        the old multiplicative formula ``mean_resonance × max(mean_relevance, 0)``,
+        which collapsed every score to ≈0 whenever the seed corpus had
+        little behavioural overlap with the target problem (the common
+        case — seed functions rarely share io-profiles with the problem
+        oracle). The additive blend guarantees that structurally
+        resonant cliques stay visible even when behavioural similarity
+        is low, while cliques that are ALSO behaviourally relevant still
+        get a boost. Cliques with zero goal-relevance are intentionally
+        NOT filtered out — their structural score alone still produces a
+        meaningful ranking. Returns a list of
+        ``(clique_ids, projection, score)`` tuples sorted descending by score.
         """
         # Step 1 — make sure the resonance matrix is current.
         self.compute_resonance()
@@ -405,7 +417,16 @@ class AxiomaticSynthesizer:
                     )
             axiom_relevance[sid] = relevance
 
-        # Step 3 — extract cliques and score each one.
+        # Step 3 — extract cliques and score each one with an ADDITIVE
+        # blend. Additive (not multiplicative) is essential here: when
+        # behavioural similarity is ~0 for most axioms — typical when
+        # the seed corpus does not share io-profiles with the problem —
+        # the old multiplicative formula drove every score to 0 and the
+        # top_k selection became arbitrary. Additive keeps the
+        # structural ranking meaningful even when relevance collapses
+        # and still boosts cliques that happen to be behaviourally
+        # relevant as well.
+        alpha = float(getattr(self.resonance, "alpha", 0.5))
         cliques = self.extract_cliques(min_size=min_clique_size)
         scored_cliques: List[Tuple[float, List[str]]] = []
         for clique in cliques:
@@ -415,7 +436,10 @@ class AxiomaticSynthesizer:
             mean_relevance = sum(
                 axiom_relevance.get(sid, 0.0) for sid in clique
             ) / len(clique)
-            score = mean_resonance * max(mean_relevance, 0.0)
+            score = (
+                alpha * mean_resonance
+                + (1.0 - alpha) * max(mean_relevance, 0.0)
+            )
             scored_cliques.append((score, clique))
 
         scored_cliques.sort(key=lambda pair: pair[0], reverse=True)
