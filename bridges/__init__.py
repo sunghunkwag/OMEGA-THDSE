@@ -25,7 +25,18 @@ __all__ = [
     "governance_synthesis_bridge",
     "goal_synthesis_bridge",
     "rsi_serl_bridge",
+    # Phase 9
     "semantic_concept_bridge",
+    # Phase 10
+    "continuous_learning_bridge",
+    # Phase 11
+    "memory_architecture_bridge",
+    # Phase 12
+    "reasoning_bridge",
+    # Phase 13
+    "agent_environment_bridge",
+    # Phase 14
+    "synthesis_breakthrough_bridge",
 ]
 
-__version__ = "0.9.0"
+__version__ = "0.14.0"
