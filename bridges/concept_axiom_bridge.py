@@ -31,11 +31,20 @@ from shared.constants import CCE_ARENA_DIM, THDSE_ARENA_DIM
 from shared.dimension_bridge import cross_arena_similarity, project_down
 from shared.exceptions import DimensionMismatchError
 
+# Phase 9 — Rule 20 wiring: the semantic-concept bridge is the new
+# upstream feeder for concept→axiom. Importing it here ensures every
+# new Phase 9 module has at least one existing-bridge consumer.
+from bridges.semantic_concept_bridge import SemanticConceptBridge
+
 
 class ConceptAxiomBridge:
     """Project CCE concept vectors into THDSE axiom space."""
 
-    def __init__(self, arena_manager: ArenaManager):
+    def __init__(
+        self,
+        arena_manager: ArenaManager,
+        semantic_bridge: SemanticConceptBridge | None = None,
+    ):
         if not isinstance(arena_manager, ArenaManager):
             raise TypeError(
                 f"arena_manager must be ArenaManager, got "
@@ -43,6 +52,44 @@ class ConceptAxiomBridge:
             )
         self._mgr = arena_manager
         self._conversion_count = 0
+        # Phase 9: optional semantic-grounding front-end. Built lazily
+        # on first use so existing callers that allocate their own
+        # concept phases continue to work without downloading any
+        # encoder model.
+        self._semantic_bridge = semantic_bridge
+
+    # ---- Phase 9 convenience: ground text then project to axiom ---- #
+
+    def ground_and_project(
+        self, text: str, concept_metadata: dict | None = None
+    ) -> dict[str, Any]:
+        """Ground raw text into CCE then project into a THDSE axiom.
+
+        Uses :class:`SemanticConceptBridge` under the hood so callers
+        can go from perception to axiom in a single call. The returned
+        dict carries both ``cce_handle`` and ``thdse_handle`` plus the
+        merged provenance chain.
+        """
+        if self._semantic_bridge is None:
+            self._semantic_bridge = SemanticConceptBridge(self._mgr)
+        grounded = self._semantic_bridge.ground_text(
+            text, context=concept_metadata
+        )
+        cce_handle = int(grounded["cce_handle"])
+        projection = self.concept_to_axiom(
+            cce_handle,
+            {
+                **(concept_metadata or {}),
+                "semantic_preview": grounded["metadata"]["ingest_metadata"][
+                    "content_preview"
+                ],
+            },
+        )
+        projection["cce_handle"] = cce_handle
+        projection["metadata"]["grounding_provenance"] = grounded["metadata"][
+            "provenance"
+        ]
+        return projection
 
     # ---- primary conversion ---- #
 

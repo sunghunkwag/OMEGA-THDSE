@@ -16,6 +16,8 @@ __all__ = [
     "deterministic_rng",
     "arena_manager",
     "dimension_bridge",
+    "semantic_encoder",
+    "perceptual_grounding",
 ]
 
-__version__ = "0.2.0"
+__version__ = "0.9.0"

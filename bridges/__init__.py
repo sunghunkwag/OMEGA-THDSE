@@ -25,6 +25,7 @@ __all__ = [
     "governance_synthesis_bridge",
     "goal_synthesis_bridge",
     "rsi_serl_bridge",
+    "semantic_concept_bridge",
 ]
 
-__version__ = "0.3.0"
+__version__ = "0.9.0"
