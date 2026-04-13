@@ -16,6 +16,20 @@ __all__ = [
     "deterministic_rng",
     "arena_manager",
     "dimension_bridge",
+    # Phase 9 — semantic grounding
+    "semantic_encoder",
+    "perceptual_grounding",
+    # Phase 10 — continuous learning
+    "online_learner",
+    # Phase 11 — deep memory
+    "deep_memory",
+    # Phase 12 — reasoning
+    "reasoning_engine",
+    # Phase 13 — environment + agent loop
+    "environment",
+    "agent_loop",
+    # Phase 14 — synthesis breakthrough
+    "synthesis_engine",
 ]
 
-__version__ = "0.2.0"
+__version__ = "0.14.0"

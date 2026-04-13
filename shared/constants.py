@@ -68,3 +68,38 @@ BRIDGE_SUBSAMPLE_STRIDE = 39            # 10000 / 256 ≈ 39.06, take every 39th
 BRIDGE_SELF_SIMILARITY_MIN = 0.95       # Minimum self-similarity through projection
 BRIDGE_RANDOM_SIMILARITY_MAX = 0.1      # Maximum similarity with random vectors
 MAX_CREDIBLE_LEAP = 0.25                # Maximum credible fitness leap per generation
+
+# === Phase 9: Semantic Grounding (D1, D2) ===
+SEMANTIC_SIMILAR_THRESHOLD = 0.6        # Minimum cosine for a "similar" pair (Rule 14)
+SEMANTIC_DISSIMILAR_THRESHOLD = 0.3     # Maximum cosine for a "dissimilar" pair (Rule 14)
+SEMANTIC_ENCODER_DIM = 384              # Semantic embedding dimension (matches MiniLM)
+
+# === Phase 10: Continuous Learning (D3) ===
+ONLINE_LEARNER_HIDDEN_DIMS = [256, 128, 64]
+ONLINE_LEARNER_DEFAULT_LR = 0.001       # Default Adam-ish learning rate
+EXPERIENCE_REPLAY_CAPACITY = 10_000     # Replay buffer size
+MIN_LOSS_DECREASE_RATIO = 0.8           # loss_after must be <= this * loss_before (Rule 13)
+
+# === Phase 11: Deep Memory (D6) ===
+EPISODIC_MEMORY_CAPACITY = 10_000
+EPISODIC_CONSOLIDATION_THRESHOLD = 5    # Rehearsals before episodic → semantic consolidation
+SEMANTIC_MEMORY_CAPACITY = 50_000
+PROCEDURAL_MEMORY_CAPACITY = 5_000
+MEMORY_TOP1_ACCURACY_MIN = 0.8          # Top-1 retrieval accuracy (Rule 18)
+
+# === Phase 12: Multi-Step Reasoning (D5, D7) ===
+REASONING_DEFAULT_DEPTH = 5             # Beyond the Phase 4 depth-2 cap
+REASONING_MAX_DEPTH = 10
+REASONING_BEAM_WIDTH = 4
+REASONING_BACKTRACK_PATIENCE = 2        # Plateau steps before backtrack
+ANALOGY_SIMILARITY_MIN = 0.5            # Analogy transfer threshold
+
+# === Phase 13: Environment Interaction (D8) ===
+AGENT_LOOP_MAX_STEPS = 1000
+AGENT_CONSOLIDATION_INTERVAL = 25       # Memory consolidation cadence
+ENV_ACTION_DIVERSITY_MIN = 0.4          # Non-dummy environment diversity (Rule 16)
+
+# === Phase 14: Synthesis Breakthrough (D4) ===
+ENHANCED_BEAM_WIDTH = 20
+DECOMPOSITION_MAX_SUBTASKS = 8
+SYNTHESIS_BENCHMARK_TARGET = 4          # Target: solve >= 4/5 benchmark problems
