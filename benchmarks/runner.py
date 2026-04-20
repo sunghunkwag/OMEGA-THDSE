@@ -132,6 +132,7 @@ def _extract_clean_atoms(source: str) -> list[str]:
     - do not contain def/class/import keywords.
     Returns at most 10 lines to avoid vocabulary explosion.
     """
+    import re
     lines = []
     for line in source.splitlines():
         s = line.strip()
@@ -140,6 +141,21 @@ def _extract_clean_atoms(source: str) -> list[str]:
             and len(s) < 80
             and not any(kw in s for kw in ("def ", "class ", "import "))
         ):
+            # Aggressive normalization: replace all lowercase words
+            # that are not python keywords or common built-ins to 'x'.
+            words = re.findall(r"\b[a-z_][a-z0-9_]*\b", s)
+            keywords = {
+                "return", "yield", "if", "else", "in", "for", "and", "or", 
+                "not", "is", "None", "True", "False"
+            }
+            builtins = {
+                "len", "sum", "max", "min", "abs", "all", "any", "range", 
+                "reversed", "sorted", "enumerate", "zip", "list", "dict", 
+                "set", "tuple", "count"
+            }
+            for w in words:
+                if w not in keywords and w not in builtins:
+                    s = re.sub(rf"\b{w}\b", "x", s)
             lines.append(s)
     return lines[:50]
 
@@ -200,19 +216,43 @@ def _build_synthesizer(
         behavioural_encoder = None
 
     # Ingest the merged corpus (seed library + problem reference solutions
-    # if any). The reference solutions are NOT the canonical answer for
-    # the problem — they're additional building blocks that may or may
-    # not appear verbatim in the synthesized output.
+    # if any).
     merged = dict(seed_corpus)
     merged.update(problem_corpus)
+
+    # Dedup clean atoms against existing corpus to avoid "duplicate cliques"
+    # which destroy VSA semantics (A ⊗ A != A).
+    existing_clean = set()
+    for s in merged.values():
+        if isinstance(s, str):
+            for a in _extract_clean_atoms(s):
+                existing_clean.add(a)
+
     for key in sorted(merged.keys()):
         src = merged[key]
         try:
-            if key.startswith("__"):
-                atoms = _extract_clean_atoms(src)
-                for i, atom in enumerate(atoms):
-                    name = f"{key}_atom_{i}"
-                    synthesizer.ingest(name, f"def atom_{i}(x):\n    {atom}")
+            if key == "__clean_atoms__":
+                if isinstance(src, list):
+                    for i, atom_str in enumerate(src):
+                        # Extract the normalized version
+                        temp_code = f"def _(x):\n    {atom_str}"
+                        clean_list = _extract_clean_atoms(temp_code)
+                        if not clean_list:
+                            continue
+                        normalized = clean_list[0]
+
+                        # Skip if already in the base corpus
+                        if normalized in existing_clean:
+                            continue
+                        
+                        # Ingest as unique atom
+                        synthesizer.ingest(
+                            f"clean_atom_{i}", f"def atom_{i}(x):\n    {normalized}"
+                        )
+                        # ensure we don't add it again if the loop continues
+                        existing_clean.add(normalized)
+            elif key.startswith("__"):
+                continue
             else:
                 synthesizer.ingest(key, src)
         except Exception:  # noqa: BLE001
@@ -297,9 +337,35 @@ def run_problem(
 
     # Build subtree vocab from the corpus.
     vocab = SubTreeVocabulary()
-    for src in seed_corpus.values():
+    existing_clean = set()
+    for s in seed_corpus.values():
+        if isinstance(s, str):
+            for a in _extract_clean_atoms(s):
+                existing_clean.add(a)
+
+    for key, src in seed_corpus.items():
         try:
-            vocab.ingest_source(src)
+            if key == "__clean_atoms__":
+                if isinstance(src, list):
+                    for i, atom_str in enumerate(src):
+                        # Extract the normalized version
+                        temp_code = f"def _(x):\n    {atom_str}"
+                        clean_list = _extract_clean_atoms(temp_code)
+                        if not clean_list:
+                            continue
+                        normalized = clean_list[0]
+
+                        # Skip if already in the base corpus
+                        if normalized in existing_clean:
+                            continue
+
+                        # Add each directly to the atom vocabulary with unique name
+                        vocab.ingest_source(f"def atom_{i}(x):\n    {normalized}")
+                        existing_clean.add(normalized)
+            elif key.startswith("__"):
+                continue
+            else:
+                vocab.ingest_source(src)
         except Exception:  # noqa: BLE001
             continue
     vocab.project_all(arena, projector)
@@ -308,7 +374,9 @@ def run_problem(
     # the decoder compositional skeletons (loops, branches) that the
     # sub-tree vocabulary alone cannot instantiate.
     template_lib = TemplateLibrary()
-    for src in seed_corpus.values():
+    for key, src in seed_corpus.items():
+        if key.startswith("__"):
+            continue
         try:
             template_lib.extract_templates(src)
         except Exception:  # noqa: BLE001
@@ -583,11 +651,14 @@ def run_suite(
     _ensure_z3()
     from shared.atom_bank import load_atoms
     accumulated = load_atoms()
-    if accumulated:
+    # Inject accumulated atoms directly into the atom vocabulary
+    # as individual clean strings — do NOT wrap in a def block,
+    # which would cause _extract_clean_atoms to re-filter them
+    # and risk vocabulary pollution from reconstructed dead lines.
+    if "__clean_atoms__" not in seed_corpus:
         seed_corpus = dict(seed_corpus)
-        # Inject each atom as a separate special corpus entry
-        for i, atom in enumerate(accumulated[:50]):
-            seed_corpus[f"__accumulated_{i}__"] = f"def atom_{i}(x):\n    {atom}\n"
+    if accumulated:
+        seed_corpus["__clean_atoms__"] = accumulated  # list[str], not str
 
     results: List[ProblemResult] = []
     for spec in problems:
@@ -657,14 +728,10 @@ def run_suite(
 
     from shared.atom_bank import save_atoms
     discovered = []
-    for prob in report.get("problems", []):
-        src = prob.get("best_source", "")
-        if src and prob.get("solved"):
-            # extract only the return line — not the full def block
-            for line in src.splitlines():
-                line = line.strip()
-                if line.startswith("return ") and len(line) < 80:
-                    discovered.append(line)
+    for prob in report["problems"]:
+        if prob.get("solved"):
+            src = prob.get("best_source", "")
+            discovered.extend(_extract_clean_atoms(src))
     save_atoms(list(set(discovered)))
 
     return report
