@@ -124,6 +124,26 @@ def _eval_source_for_problem(
 # --------------------------------------------------------------------------- #
 
 
+def _extract_clean_atoms(source: str) -> list[str]:
+    """
+    From a synthesized source block, extract only lines that are:
+    - a valid `return <expr>` statement, AND
+    - shorter than 80 characters, AND
+    - do not contain def/class/import keywords.
+    Returns at most 10 lines to avoid vocabulary explosion.
+    """
+    lines = []
+    for line in source.splitlines():
+        s = line.strip()
+        if (
+            s.startswith("return ")
+            and len(s) < 80
+            and not any(kw in s for kw in ("def ", "class ", "import "))
+        ):
+            lines.append(s)
+    return lines[:10]
+
+
 def _build_synthesizer(
     seed_corpus: Dict[str, str],
     problem_corpus: Dict[str, str],
@@ -185,9 +205,15 @@ def _build_synthesizer(
     # not appear verbatim in the synthesized output.
     merged = dict(seed_corpus)
     merged.update(problem_corpus)
-    for name in sorted(merged.keys()):
+    for key in sorted(merged.keys()):
+        src = merged[key]
         try:
-            synthesizer.ingest(name, merged[name])
+            if key.startswith("__"):
+                atoms = _extract_clean_atoms(src)
+                for atom in atoms:
+                    synthesizer.ingest(f"{key}_{hash(atom)}", f"def atom(x):\n    {atom}")
+            else:
+                synthesizer.ingest(key, src)
         except Exception:  # noqa: BLE001
             continue
 
