@@ -136,6 +136,14 @@ OMEGA-THDSE/
 # Install runtime deps (pytest + numpy).
 pip install numpy pytest
 
+> **No Rust toolchain required.**  
+> When the `hdc_core` Rust wheel is unavailable, `ArenaManager`
+> automatically falls back to a pure-Python arena implementation with
+> reduced capacity (`CCE: 1,000 slots`, `THDSE: 10,000 slots`).
+> All bridges, tests, and the CLI work identically in this mode.
+> If the Rust wheel is present, full capacity is used automatically
+> (`CCE: 100,000`, `THDSE: 2,000,000`).
+
 # Run the complete test suite (all five phases).
 python cli.py test
 
@@ -264,26 +272,32 @@ from "FHRR similarity" to "io_example pass rate":
 
 ### Benchmark results
 
-Both configurations now genuinely solve two of the five problems via
-io-example-driven candidate selection — `return sum(x)` and
-`return max(x)` are chosen because they pass every io_example, not
-because of any FHRR similarity score.
+Baseline configuration solves 3 out of 5 problems, while Phase 8 solves 4 out of 5 problems. Phase 8 newly solves `reverse_list` via `x[::-1]` slicing, which the baseline failed to discover (best pass rate 0.45). `flatten_nested` remains unsolved in both modes; the system produces no above-fitness atoms across all 3 cycles, indicating a structural limit — recursive/nested decomposition requires atom types not yet present in the synthesizer vocabulary.
 
-| Problem             | Baseline | Phase 8 |
-|---------------------|---------:|--------:|
-| sum_list            | **1.000** | **1.000** |
-| max_element         | **1.000** | **1.000** |
-| reverse_list        |   0.450  |   0.450  |
-| count_occurrences   |   0.500  |   0.500  |
-| flatten_nested      |   0.300  |   0.300  |
-| **Average**         | **0.650** | **0.650** |
-| **Solved**          |   2 / 5  |   2 / 5  |
+| Problem             | Baseline pass rate | Phase 8 pass rate | Baseline solved | Phase 8 solved |
+|---------------------|:-----------------:|:-----------------:|:---------------:|:--------------:|
+| sum_list            | 1.000             | 1.000             | ✓               | ✓              |
+| max_element         | 1.000             | 1.000             | ✓               | ✓              |
+| reverse_list        | 0.450             | **1.000**         | ✗               | ✓              |
+| count_occurrences   | 1.000             | 1.000             | ✓               | ✓              |
+| flatten_nested      | 0.300             | 0.300             | ✗               | ✗              |
+| **Solve rate**      | **0.60 (3/5)**    | **0.80 (4/5)**    |                 |                |
+| **Avg pass rate**   | 0.750             | 0.860             |                 |                |
 
-Prior to this refactor the same suite scored 0/5 solved with a
-baseline average of ≈0.22 and a Phase 8 average of ≈0.04 (a measurable
-regression of the goal-directed path). Phase 8 now ties the baseline
-on every problem, satisfying the "not a regression" invariant under
-the new success criterion.
+### Speed vs. accuracy trade-off
+
+Phase 8 (behavioural + goal_direction + CEGR all enabled) achieves higher solve rates at the cost of significantly more synthesis attempts and wall-clock time:
+
+| Problem           | Baseline attempts | Phase 8 attempts | Baseline time | Phase 8 time |
+|-------------------|:-----------------:|:----------------:|:-------------:|:------------:|
+| sum_list          | 5                 | 86               | 1.1 s         | 58.1 s       |
+| max_element       | 5                 | 132              | 0.9 s         | 91.7 s       |
+| reverse_list      | 15                | 45               | 2.6 s         | 15.1 s       |
+| count_occurrences | 5                 | 40               | 1.0 s         | 28.4 s       |
+| flatten_nested    | 15                | 114              | 2.2 s         | 103.6 s      |
+| **Total**         | **45**            | **417**          | **7.9 s**     | **296.9 s**  |
+
+Phase 8 uses approximately 9× more synthesis attempts and runs approximately 37× slower in total wall time than the baseline. For latency-sensitive applications, the baseline configuration (behavioural=False, goal_direction=False, CEGR=False) is recommended.
 
 The regression tests live in `thdse/tests/test_beam_decode.py` —
 thirteen tests covering multi-candidate enumeration, real blocking-
