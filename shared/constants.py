@@ -9,8 +9,12 @@ any value in this file.
 # === Arena Dimensions ===
 CCE_ARENA_DIM = 10_000
 CCE_ARENA_CAP = 100_000
+CCE_ARENA_CAP_SMALL = 1_000    # safe for memory-limited envs
+
 THDSE_ARENA_DIM = 256
 THDSE_ARENA_CAP = 2_000_000
+THDSE_ARENA_CAP_SMALL = 10_000
+
 BRIDGE_ARENA_DIM = 10_000
 BRIDGE_ARENA_CAP = 50_000
 
