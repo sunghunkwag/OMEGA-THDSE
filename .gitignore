@@ -32,3 +32,6 @@ desktop.ini
 
 # Evidence logs
 evidence_*.jsonl
+
+# RSI persistence
+shared/atom_bank.json

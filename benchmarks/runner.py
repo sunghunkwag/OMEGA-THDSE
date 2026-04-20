@@ -554,6 +554,15 @@ def run_suite(
 ) -> Dict[str, Any]:
     """Run every problem in ``problems`` and aggregate the metrics."""
     _ensure_z3()
+    from shared.atom_bank import load_atoms
+    accumulated = load_atoms()
+    if accumulated:
+        seed_corpus = dict(seed_corpus)
+        seed_corpus["__accumulated_atoms__"] = (
+            "def __accumulated__(x):\n"
+            + "".join(f"    {a}\n" for a in accumulated[:50])
+        )
+
     results: List[ProblemResult] = []
     for spec in problems:
         result = run_problem(
@@ -574,7 +583,7 @@ def run_suite(
         total_atoms / max(total_attempts, 1) if total_attempts > 0 else 0.0
     )
 
-    return {
+    report = {
         "config": {
             "use_behavioural": use_behavioural,
             "use_goal_direction": use_goal_direction,
@@ -619,6 +628,20 @@ def run_suite(
             for r in results
         ],
     }
+
+    from shared.atom_bank import save_atoms
+    discovered = []
+    for prob in report.get("problems", []):
+        src = prob.get("best_source", "")
+        if src and prob.get("solved"):
+            # extract only the return line — not the full def block
+            for line in src.splitlines():
+                line = line.strip()
+                if line.startswith("return ") and len(line) < 80:
+                    discovered.append(line)
+    save_atoms(list(set(discovered)))
+
+    return report
 
 
 def write_json(path: Path, payload: Dict[str, Any]) -> None:
