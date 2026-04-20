@@ -292,6 +292,14 @@ SEED_CORPUS: Dict[str, str] = {
         "def sorted_helper(arr):\n"
         "    return sorted(arr)\n"
     ),
+    "builtin_flatten": (
+        "def builtin_flatten(arr):\n"
+        "    return sum(arr, [])\n"
+    ),
+    "builtin_reverse": (
+        "def builtin_reverse(arr):\n"
+        "    return arr[::-1]\n"
+    ),
 }
 
 

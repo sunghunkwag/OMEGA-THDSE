@@ -141,7 +141,7 @@ def _extract_clean_atoms(source: str) -> list[str]:
             and not any(kw in s for kw in ("def ", "class ", "import "))
         ):
             lines.append(s)
-    return lines[:10]
+    return lines[:50]
 
 
 def _build_synthesizer(
@@ -210,8 +210,9 @@ def _build_synthesizer(
         try:
             if key.startswith("__"):
                 atoms = _extract_clean_atoms(src)
-                for atom in atoms:
-                    synthesizer.ingest(f"{key}_{hash(atom)}", f"def atom(x):\n    {atom}")
+                for i, atom in enumerate(atoms):
+                    name = f"{key}_atom_{i}"
+                    synthesizer.ingest(name, f"def atom_{i}(x):\n    {atom}")
             else:
                 synthesizer.ingest(key, src)
         except Exception:  # noqa: BLE001
@@ -584,10 +585,9 @@ def run_suite(
     accumulated = load_atoms()
     if accumulated:
         seed_corpus = dict(seed_corpus)
-        seed_corpus["__accumulated_atoms__"] = (
-            "def __accumulated__(x):\n"
-            + "".join(f"    {a}\n" for a in accumulated[:50])
-        )
+        # Inject each atom as a separate special corpus entry
+        for i, atom in enumerate(accumulated[:50]):
+            seed_corpus[f"__accumulated_{i}__"] = f"def atom_{i}(x):\n    {atom}\n"
 
     results: List[ProblemResult] = []
     for spec in problems:
