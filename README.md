@@ -33,21 +33,21 @@ The fix is a centrally-owned `ArenaManager` that holds exactly the two
 working arenas (CCE @ 10k, THDSE @ 256) plus a `bridge_arena` for
 cross-engine correlation, paired with an **asymmetric
 `DimensionBridge`** whose mathematics were designed specifically to
-preserve FHRR bind/bundle invariants across the 10k↔256 boundary.
+preserve FHRR bind/bundle invariants across the 10k↔5256 boundary.
 
 ---
 
 ## Architecture at a glance
 
 ```
-┌──────────────────────────────────────────────────────────────┐
+┌───────────────────────────────────────────────────────────────┐
 │                    shared/  (Phase 2 foundation)             │
 │  ArenaManager  •  DimensionBridge  •  DeterministicRNG       │
 │  constants     •  exceptions                                  │
-└──────────────────────────────────────────────────────────────┘
+└───────────────────────────────────────────────────────────────┘
             ↑                ↑                    ↑
             │                │                    │
-┌───────────┴────────┐ ┌────┴─────────┐ ┌────────┴──────────┐
+┌───────────┼────────┐ ┌────┼─────────┐ ┌────────┼─────────┐
 │ bridges/ (Phase 3) │ │ Phase 4 wire │ │   tests/ (all 5)  │
 │ 6 gap modules      │ │ into CCE     │ │   205+ tests      │
 │ + Phase 4          │ │ (fhrr,skills,│ │   + E2E + audit   │
@@ -95,7 +95,7 @@ OMEGA-THDSE/
 │   ├── exceptions.py                # Typed boundary errors
 │   ├── deterministic_rng.py         # DeterministicRNG + FrozenRNG
 │   ├── arena_manager.py             # Single arena owner (Rule 3)
-│   └── dimension_bridge.py          # 10k↔256 asymmetric bridge (Rule 12)
+│   └── dimension_bridge.py          # 10k↔5256 asymmetric bridge (Rule 12)
 ├── bridges/                         # Phases 3 + 4
 │   ├── __init__.py
 │   ├── concept_axiom_bridge.py      # Gap 2  (Phase 3)
@@ -107,10 +107,15 @@ OMEGA-THDSE/
 │   ├── memory_hypothesis_bridge.py  # Gap 5  (Phase 4)
 │   ├── world_model_swarm_bridge.py  # Gap 7  (Phase 4)
 │   └── self_model_bridge.py         # Gap 9  (Phase 4)
+├── thdse/
+│   └── src/synthesis/
+│       ├── atom_generator.py        # NEW — UNSAT-driven vocab expansion
+│       ├── serl.py                  # UPDATED — dimension auto-expansion
+│       ├── axiomatic_synthesizer.py
+│       └── …
 ├── Cognitive-Core-Engine-Test/      # CCE — modified in Phase 4
 │   └── cognitive_core_engine/core/  # fhrr, skills, memory, agent,
 │       └── …                         # orchestrator, causal_chain, …
-├── thdse/                           # THDSE Rust side (unchanged)
 └── tests/                           # All five phases' tests
     ├── test_arena_manager.py
     ├── test_dimension_bridge.py
@@ -184,6 +189,92 @@ closed by the modules in `bridges/`:
 
 ---
 
+## Architectural gaps closed (post-Phase 5)
+
+Two structural gaps in the SERL/vocabulary pipeline were identified
+and closed after the five-phase integration:
+
+### Gap A — `AtomGenerator`: UNSAT-driven vocabulary expansion
+
+**File:** `thdse/src/synthesis/atom_generator.py`  
+**Commit:** `9d08d87`
+
+When the Z3 constraint solver returns UNSAT for a synthesis clique it
+means the current `SubTreeVocabulary` cannot represent a satisfying
+assignment. `AtomGenerator.generate_from_unsat()` closes this gap:
+
+```python
+gen = AtomGenerator(provenance_bridge=cpb)
+new_atoms = gen.generate_from_unsat(
+    {"formula_id": "test", "reason": "no_recursive_call"},
+    subtree_vocab,
+    arena,
+)
+# returns list[str] of atoms actually added (empty if none passed Z3)
+```
+
+**How it works:**
+
+1. The `reason` field of the UNSAT log is matched (case-insensitive
+   substring) against a table of structural reason keys
+   (`no_recursive_call`, `missing_loop`, `missing_conditional`,
+   `missing_accumulator`, `no_base_case`, `missing_return`,
+   `index_out_of_range`, `unsat` — generic fallback). Different reason
+   strings select different template sets — the method is demonstrably
+   input-dependent.
+2. Each candidate snippet is validated through a two-stage Z3 check:
+   - **Syntax:** `ast.parse()` must succeed.
+   - **Structural SAT:** every `ast.Compare` node is encoded as a Z3
+     integer constraint; the conjunction must be satisfiable.
+3. Survivors are injected via `SubTreeVocabulary.ingest_source()` —
+   the only public write path the vocabulary exposes.
+4. Every Z3 result (SAT *and* UNSAT) is emitted through
+   `CausalProvenanceBridge.record_synthesis_event()` when wired —
+   **zero silent failures** (Rule 8 compliance).
+
+### Gap B — Dimension auto-expansion trigger in `SERLLoop`
+
+**File:** `thdse/src/synthesis/serl.py`  
+**Commit:** `6ce223c`
+
+The SERL loop can saturate its 256-dim THDSE arena when the
+vocabulary grows faster than the handle space can accommodate new
+atom projections. Two private methods added to `SERLLoop` detect
+this condition and trigger an expansion:
+
+```python
+# Called automatically inside SERLLoop.run() after each vocab step
+needs_expansion: bool = self._check_expansion_needed(
+    fitness_history,          # actual list — not a counter
+    stagnation_window=20,
+    correlation_threshold=0.85,
+)
+if needs_expansion:
+    new_dim = self._trigger_expansion(arena, current_dimension)
+```
+
+**`_check_expansion_needed` — three trigger conditions (ALL implemented):**
+
+| # | Condition | Implementation |
+|---|-----------|----------------|
+| 1 | **Stagnation** | Last `stagnation_window` entries of `fitness_history` are all equal to `max(fitness_history)` — actual list comparison, not a counter |
+| 2 | **Saturation** | Mean pairwise FHRR cosine similarity of active THDSE handles > `correlation_threshold`, computed via `arena_manager` when wired; skipped gracefully otherwise |
+| 3 | **Vocab collision** | `subtree_vocab.size()` has not grown despite stagnant fitness — size-delta proxy (SubTreeVocabulary has no dedicated collision API; the approximation is documented inline) |
+
+**`_trigger_expansion` guarantees:**
+- Calls `arena.expand_dimension(target)` when the method exists.
+- Returns the **actual** new dimension (read back from the arena), not
+  just the target.
+- Falls back gracefully when `expand_dimension` is absent or raises;
+  existing handle vectors are always preserved.
+- Logs the event via `causal_tracker` when wired.
+
+**Additive design:** the two new methods are pure additions — the
+existing `consecutive_zero` / `stagnation_limit` halt logic in `run()`
+is completely unchanged.
+
+---
+
 ## The twelve anti-shortcut rules
 
 PLAN.md Section G defines twelve rules that guard the integration from
@@ -217,6 +308,8 @@ loudly if any of them are violated.
 | 3     | Bridge modules               | `bridges/` with 6 gap modules + 5 test modules (~70 tests)                       | ✓     |
 | 4     | Core enhancement             | 7 CCE files modified + 3 new bridges + 4 test modules (~65 tests)                | ✓     |
 | 5     | Final integration            | E2E + 12-rule audit + `cli.py` + this README + full pipeline verification       | ✓     |
+| A     | AtomGenerator (UNSAT vocab)  | `thdse/src/synthesis/atom_generator.py` + Z3 validation + provenance logging     | ✓     |
+| B     | SERL dimension expansion     | `_check_expansion_needed` + `_trigger_expansion` wired into `SERLLoop.run()`     | ✓     |
 
 Every green check-mark above is produced by `cli.py status` after
 walking the real filesystem — there is no hardcoded state.
