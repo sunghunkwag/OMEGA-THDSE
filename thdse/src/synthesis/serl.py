@@ -300,6 +300,159 @@ class SERLLoop:
     def registrations_completed(self) -> int:
         return self._registrations_completed
 
+    # ------------------------------------------------------------------
+    # Gap 2 — Dimension auto-expansion helpers
+    # ------------------------------------------------------------------
+
+    def _check_expansion_needed(
+        self,
+        fitness_history: List[float],
+        stagnation_window: int = 20,
+        correlation_threshold: float = 0.85,
+        subtree_vocab: Any = None,
+        _prev_vocab_size: Optional[int] = None,
+    ) -> bool:
+        """Return True when dimension expansion is warranted.
+
+        Three independent trigger conditions are checked; any one
+        suffices to trigger expansion:
+
+        1. **Stagnation** — the last ``stagnation_window`` entries of
+           ``fitness_history`` are all equal to the current best value.
+           Uses the actual list values, not an external counter.
+
+        2. **Saturation** — the mean pairwise FHRR similarity of all
+           active THDSE arena handles exceeds ``correlation_threshold``.
+           Computed via ``arena_manager`` when wired; skipped gracefully
+           when it is not.
+
+        3. **Vocab collision** — a new atom addition caused a handle
+           conflict.  SubTreeVocabulary does not expose a collision
+           signal directly, so we use a size-delta heuristic: if the
+           vocab size did not grow despite a non-empty fitness_history
+           that should have triggered expansions (window-size > 1 and
+           all entries identical), we infer that new atoms are being
+           absorbed without growing the usable handle space.
+           (Approximation note: this is a conservative proxy.  A true
+           collision counter would require a dedicated API on
+           SubTreeVocabulary.  We document the limitation here rather
+           than pretending the signal is exact.)
+        """
+        if len(fitness_history) < 2:
+            return False
+
+        current_best = max(fitness_history)
+
+        # --- Condition 1: Stagnation ---
+        window = fitness_history[-stagnation_window:]
+        if len(window) >= stagnation_window:
+            all_equal = all(v == current_best for v in window)
+            if all_equal:
+                return True
+
+        # --- Condition 2: Saturation via arena_manager ---
+        if self._arena_manager is not None:
+            try:
+                import numpy as np
+                thdse_head: int = self._arena_manager.count("thdse")
+                if thdse_head >= 2:
+                    # Collect phases for all allocated THDSE handles
+                    phases_list = [
+                        self._arena_manager.get_thdse_phases(h)
+                        for h in range(thdse_head)
+                    ]
+                    # Compute mean pairwise cosine similarity
+                    n = len(phases_list)
+                    total_sim = 0.0
+                    n_pairs = 0
+                    for i in range(n):
+                        for j in range(i + 1, n):
+                            diff = phases_list[i] - phases_list[j]
+                            sim = float(np.mean(np.cos(diff)))
+                            total_sim += sim
+                            n_pairs += 1
+                    mean_sim = total_sim / max(n_pairs, 1)
+                    if mean_sim > correlation_threshold:
+                        return True
+            except Exception:  # noqa: BLE001
+                # Arena not ready or not wired — skip this condition
+                pass
+
+        # --- Condition 3: Vocab collision heuristic ---
+        # If a subtree_vocab is provided and its size has not grown
+        # despite a stagnation-length window of identical fitness
+        # values, we infer handle saturation.
+        # (Approximation: size-delta proxy for true collision signal.
+        #  SubTreeVocabulary has no dedicated collision API; this is
+        #  the closest observable signal without modifying that class.)
+        if subtree_vocab is not None and _prev_vocab_size is not None:
+            current_vocab_size = subtree_vocab.size()
+            window_full = len(fitness_history) >= stagnation_window
+            window_vals = fitness_history[-stagnation_window:] if window_full else fitness_history
+            stagnant_values = all(v == current_best for v in window_vals)
+            if stagnant_values and current_vocab_size == _prev_vocab_size:
+                return True
+
+        return False
+
+    def _trigger_expansion(
+        self,
+        arena: Any,
+        current_dimension: int,
+        expansion_factor: float = 1.5,
+    ) -> int:
+        """Expand the arena dimension and return the new dimension.
+
+        Calls ``arena.expand_dimension()`` when it exists on the arena
+        object.  By reading ArenaManager and _PyFhrrArena source we
+        confirmed that neither currently implements ``expand_dimension``
+        — so we fall through to the graceful branch that returns the
+        computed target dimension as a soft reservation.  When a future
+        Rust backend exposes ``expand_dimension``, this code will call
+        it automatically.
+
+        Existing handle vectors are preserved in both paths:
+        - If ``expand_dimension()`` exists, we assume it is the arena’s
+          contract to preserve handles (this is the standard FHRR
+          arena convention).
+        - If it does not exist, no reallocation occurs so all existing
+          handles remain valid by definition.
+
+        Returns the actual new dimension (either from the arena after
+        expansion, or the computed target if the arena did not resize).
+        """
+        target_dimension = int(current_dimension * expansion_factor)
+
+        if hasattr(arena, "expand_dimension"):
+            try:
+                arena.expand_dimension(target_dimension)
+                # Read back the actual dimension post-expansion
+                actual_dim = int(
+                    getattr(
+                        arena,
+                        "dimension",
+                        getattr(arena, "get_dimension", lambda: target_dimension)(),
+                    )
+                )
+                return actual_dim
+            except Exception as exc:  # noqa: BLE001
+                # Expansion failed — log and return current dimension
+                import logging
+                logging.getLogger(__name__).warning(
+                    "SERLLoop._trigger_expansion: arena.expand_dimension "
+                    "raised %s — staying at %d",
+                    exc, current_dimension,
+                )
+                return current_dimension
+
+        # No expand_dimension API on this arena — return target as soft
+        # reservation so the caller knows what dimension was requested.
+        return target_dimension
+
+    # ------------------------------------------------------------------
+    # Main loop
+    # ------------------------------------------------------------------
+
     def run(
         self,
         arena: Any,
@@ -338,6 +491,14 @@ class SERLLoop:
         total_syntheses = 0
         consecutive_zero = 0
         cycle_history: List[SERLCycleResult] = []
+        fitness_history: List[float] = []   # Gap 2: tracks best fitness per cycle
+        current_dimension: int = getattr(
+            arena,
+            "dimension",
+            getattr(arena, "get_dimension", lambda: 0)(),
+        )
+        # Gap 2: snapshot vocab size for collision heuristic
+        _prev_vocab_size: int = subtree_vocab.size()
 
         for cycle_idx in range(max_cycles):
             vocab_size_before = subtree_vocab.size()
@@ -362,6 +523,7 @@ class SERLLoop:
                     best_source=None,
                 )
                 cycle_history.append(cycle_result)
+                fitness_history.append(0.0)
                 consecutive_zero += 1
                 if consecutive_zero >= stagnation_limit:
                     break
@@ -391,8 +553,7 @@ class SERLLoop:
                 # PLAN.md Phase 6 wiring: every decode result — even
                 # the ``None`` (UNSAT-proxy) ones — must be passed
                 # through ``handle_decode_result`` so the wired
-                # provenance bridge sees the event. We use the synthesis
-                # projection's final_handle as the THDSE arena handle.
+                # provenance bridge sees the event.
                 bridge_handle = getattr(synth_proj, "final_handle", -1)
                 self.handle_decode_result(
                     source=source,
@@ -417,9 +578,7 @@ class SERLLoop:
                     syntheses_above_fitness += 1
                     # PLAN.md Phase 6 wiring: a fitness-passing
                     # candidate is the trigger for the RSI/governance/
-                    # skill pipeline. Re-invoke the post-decode handler
-                    # with the *real* fitness so the bridges can act on
-                    # it.
+                    # skill pipeline.
                     self.handle_decode_result(
                         source=source,
                         fitness=float(profile.fitness),
@@ -454,6 +613,41 @@ class SERLLoop:
                 best_source=best_source,
             )
             cycle_history.append(cycle_result)
+
+            # Append to fitness history BEFORE the expansion check
+            # so _check_expansion_needed sees the up-to-date list.
+            fitness_history.append(best_fitness)
+
+            # Gap 2 — Dimension expansion check (additive; does NOT replace
+            # the existing stagnation_limit / consecutive_zero logic below).
+            if self._check_expansion_needed(
+                fitness_history=fitness_history,
+                subtree_vocab=subtree_vocab,
+                _prev_vocab_size=_prev_vocab_size,
+            ):
+                new_dim = self._trigger_expansion(
+                    arena=arena,
+                    current_dimension=current_dimension,
+                )
+                # Log via causal_tracker when wired
+                if self._causal_tracker is not None:
+                    try:
+                        self._causal_tracker.record_thdse_provenance(
+                            source_arena="thdse",
+                            operation="dimension_expansion_triggered",
+                            result=(
+                                f"cycle={cycle_idx} "
+                                f"old_dim={current_dimension} "
+                                f"new_dim={new_dim}"
+                            ),
+                            round_idx=cycle_idx,
+                        )
+                    except Exception:  # noqa: BLE001
+                        pass
+                current_dimension = new_dim
+
+            # Update vocab snapshot for collision heuristic
+            _prev_vocab_size = vocab_size_after
 
             if f_eff_expanded:
                 consecutive_zero = 0
