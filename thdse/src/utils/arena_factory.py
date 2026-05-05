@@ -106,7 +106,7 @@ class _PyFhrrArenaExtended:
                 f"Phase length mismatch: expected {self._dimension}, "
                 f"got {len(seq)}"
             )
-        self._phases[handle] = [float(p) % _TWO_PI for p in seq]
+        self._phases[handle] = [float(p) for p in seq]
 
     def extract_phases(self, handle: int) -> List[float]:
         self._validate_handle(handle)
@@ -127,7 +127,7 @@ class _PyFhrrArenaExtended:
         a = self._phases[h1] or []
         b = self._phases[h2] or []
         self._phases[out] = [
-            (a[i] + b[i]) % _TWO_PI for i in range(self._dimension)
+            a[i] + b[i] for i in range(self._dimension)
         ]
         bind_count, bundle_count = self._op_counts[out]
         self._op_counts[out] = (bind_count + 1, bundle_count)
@@ -147,7 +147,7 @@ class _PyFhrrArenaExtended:
                 sin_sum[i] += math.sin(phases[i])
                 cos_sum[i] += math.cos(phases[i])
         result = [
-            math.atan2(sin_sum[i], cos_sum[i]) % _TWO_PI for i in range(d)
+            math.atan2(sin_sum[i], cos_sum[i]) for i in range(d)
         ]
         self._phases[out] = result
         bind_count, bundle_count = self._op_counts[out]
@@ -162,18 +162,13 @@ class _PyFhrrArenaExtended:
         return float(sum(math.cos(a[i] - b[i]) for i in range(d)) / d)
 
     # The Rust arena exposes ``correlate_matrix`` for batched scoring.
-    def correlate_matrix(self, handles: Sequence[int]) -> List[List[float]]:
+    def correlate_matrix(self, handles: Sequence[int]) -> List[float]:
         n = len(handles)
-        matrix = [[0.0] * n for _ in range(n)]
+        result = []
         for i in range(n):
-            for j in range(n):
-                if i == j:
-                    matrix[i][j] = 1.0
-                else:
-                    matrix[i][j] = self.compute_correlation(
-                        handles[i], handles[j]
-                    )
-        return matrix
+            for j in range(i + 1, n):
+                result.append(self.compute_correlation(handles[i], handles[j]))
+        return result
 
     def bind_bundle_fusion(
         self,
@@ -183,11 +178,12 @@ class _PyFhrrArenaExtended:
     ) -> None:
         if not handles_bundle:
             raise ValueError("bind_bundle_fusion requires non-empty handles")
-        # Allocate a temp slot for the intermediate bundle.
-        tmp = self.allocate()
-        self.bundle(handles_bundle, tmp)
-        self.bind(h_bind, tmp, out)
-        # Track the fused cost.
+        self.bundle(handles_bundle, out)
+        bundle_copy = list(self._phases[out])
+        bind_src = self._phases[h_bind] or []
+        self._phases[out] = [
+            bind_src[i] + bundle_copy[i] for i in range(self._dimension)
+        ]
         bind_count, bundle_count = self._op_counts[out]
         self._op_counts[out] = (bind_count + 1, bundle_count + 1)
 
@@ -206,7 +202,7 @@ class _PyFhrrArenaExtended:
                 continue
             extended = list(existing)
             for j in range(old_dim, new_dim):
-                # Conjugate reflection of the periodic component, mod 2π.
+                # Conjugate reflection of the periodic component (phase negation).
                 extended.append((-existing[j % old_dim]) % _TWO_PI)
             self._phases[h] = extended
         self._dimension = new_dim

@@ -695,7 +695,8 @@ impl FhrrArena {
         let mut p_out = p_buf.add(out_handle * floats);
         let end = p1.add(floats);
         
-        let simd_end = end.sub(floats % 8);
+        let simd_end = p1.add((floats / 8) * 8);
+        debug_assert!(simd_end >= p1);
         while p1 < simd_end {
             let a = _mm256_loadu_ps(p1);
             let b = _mm256_loadu_ps(p2);
@@ -747,7 +748,8 @@ impl FhrrArena {
             let mut p_curr = p_buf.add(h * floats);
             let mut p_out_curr = p_out;
             let end = p_curr.add(floats);
-            let simd_end = end.sub(floats % 8);
+            let simd_end = p_curr.add((floats / 8) * 8);
+            debug_assert!(simd_end >= p_curr);
 
             while p_curr < simd_end {
                 let v_out = _mm256_loadu_ps(p_out_curr);
@@ -927,7 +929,8 @@ impl FhrrArena {
             let mut p_v = p_buf.add(v_offset);
             let mut p_x = p_buf.add(x_offset);
             let end = p_v.add(floats);
-            let simd_end = end.sub(floats % 8);
+            let simd_end = p_v.add((floats / 8) * 8);
+            debug_assert!(simd_end >= p_v);
 
             while p_v < simd_end {
                 let v_vec = _mm256_loadu_ps(p_v);
