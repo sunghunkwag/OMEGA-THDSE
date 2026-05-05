@@ -63,8 +63,10 @@ audit (see Rule 3 below).
 
 ### The asymmetric dimension bridge
 
-FHRR vectors are **phase vectors**: every component is an angle in
-`[0, 2π)`, and `bind` is element-wise phase addition mod 2π. Because
+FHRR vectors are **phase vectors**: every component is an angle, and
+canonical storage is typically represented in `[0, 2π)` while some
+Python fallback paths may keep signed `atan2` output internally; `bind`
+remains element-wise phase addition mod 2π. Because
 bind is element-wise, **stride-39 phase subsampling commutes with bind
 exactly**:
 
