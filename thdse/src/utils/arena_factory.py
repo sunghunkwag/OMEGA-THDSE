@@ -203,7 +203,7 @@ class _PyFhrrArenaExtended:
             extended = list(existing)
             for j in range(old_dim, new_dim):
                 # Conjugate reflection of the periodic component (phase negation).
-                extended.append((-existing[j % old_dim]) % _TWO_PI)
+                extended.append(-existing[j % old_dim])
             self._phases[h] = extended
         self._dimension = new_dim
 
@@ -291,7 +291,7 @@ class _PyFhrrArenaExtended:
                 if mag > 1e-12:
                     xr /= mag
                     xi /= mag
-                new_phases.append(math.atan2(xi, xr) % _TWO_PI)
+                new_phases.append(math.atan2(xi, xr))
             self._phases[h] = new_phases
             projected_count += 1
         return projected_count
